@@ -4,7 +4,7 @@ Scripts and data for:
   
 Sim C.W.H., Ribeiro C.G., Probert I., Gourvil P., Vaulot D. & Lopes dos Santos, A. (2025). Functional succession and interactions of protists during the under-ice Arctic phytoplankton spring bloom (In Prep).
   
-List of packages used across all R files are listed in GE_IC_read_phyloseq.R. Please make sure to install packages before running. Scripts are written using relative file paths, no changes any file paths are required upon cloning this repository.
+List of packages used across all R files are listed in GE_IC_functional_read_phyloseq.R. Please make sure to install packages before running. Scripts are written using relative file paths, no changes any file paths are required upon cloning this repository.
 
 ## R_ice_camp
 All files involved in generating figures and data used in this study.
