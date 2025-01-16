@@ -1,0 +1,37 @@
+library(knitr)
+library(rmdformats)
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(maps)
+library(glue)
+library(RColorBrewer)
+library(phyloseq)
+library(forcats)
+library(rio)
+library(here)
+library(purrr)
+library(directlabels)
+library(lubridate)
+library(patchwork)
+library(readxl)
+library(ggcharts)
+library(scales)
+library(indicspecies)
+library(ggrepel)
+library(ggpubr)
+library(tidyverse)
+library(ggmap)
+library(pracma)
+library(vegan)
+library(xtable) 
+
+# load PS file and removing non-protist
+ps_unsorted <- readRDS("../R_Ice_camp/metabarcoding/GE_IC_phyloseq_datasets_21_22_23.rds") %>% 
+  subset_samples(dataset_id=="21") %>%
+  subset_taxa(!(division %in% c("Metazoa", "Fungi","Rhodophyta")) & 
+                !(class %in% c("Phaeophyceae","Embryophyceae","Opisthokonta_XX")) &
+                !(order %in% c("Bryopsidales","Ulotrichales","Dasycladales","Trentepohliales","Cladophorales"))) 

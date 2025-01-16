@@ -1,0 +1,2933 @@
+---
+title: "GE_IC_functional"
+author: "Clarence Sim"
+date: ""
+output: pdf_document
+---
+
+```{r knitr_init, echo=FALSE, cache=FALSE}
+
+library(knitr)
+library(rmdformats)
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=TRUE,
+	             cache=FALSE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               eval = TRUE)
+opts_knit$set(width=75)
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+```
+
+# File and data organisation
+## Load various R files (Must be in this order)
+
+```{r, echo=FALSE}
+#Read phyloseq file
+source("./GE_IC_functional_phyloseq.R")
+
+#Adding sample labels, clusters, organizing the depths, assigning trophic_mode, functional_trait and substrate specificity.
+source("./GE_IC_functional_data_organisation.R") 
+
+#Read color allocation for plots
+source("./GE_IC_color.R")
+
+#load functions (e.g. treemap, longform, normalize)
+source("./GE_IC_functions.R")
+
+```
+
+## Retrieve only the time series (TS) samples from the phyloseq file
+
+```{r, message=FALSE }
+ps <- ps %>% subset_samples(is.na(experiment_name) & 
+                                 (substrate=="water" | substrate=="ice") & 
+                                 fraction_name %in% c("pico","nano","micro")) %>%
+  subset_taxa(!confident_boot %in% c("domain","supergroup")) %>%#more very ambiguous ASVs 
+  subset_taxa(!(division %in% c("Rhodophyta")) &
+                !(subdivision %in% c("Metazoa", "Fungi","Rhodophyta","Stramenopiles_X")) & 
+                !(class %in% c("Phaeophyceae","Embryophyceae","Opisthokonta_XX")) &
+                !(order %in% c("Bryopsidales","Ulotrichales","Dasycladales","Trentepohliales","Cladophorales"))) 
+
+ps <- phyloseq_normalize_median(ps)
+long <- phyloseq_transform_to_long(ps) 
+long <- filter(long,is.na(fraction_name)=="FALSE") # normalization removed ASVs with very low reads
+ps <- ps %>% subset_taxa(row.names(tax_table(ps)) %in% unique(long$asv_code))
+
+ps_DNA <- ps %>% subset_samples(DNA_RNA=="DNA")
+ps_RNA <- ps %>% subset_samples(DNA_RNA=="RNA")
+
+taxa <- data.frame(tax_table(ps)) %>% rownames_to_column("asv_code") %>% filter(asv_code %in% unique(long$asv_code))
+sample <- data.frame(sample_data(ps)) %>% select(sample_name,metadata_code,DNA_RNA,fraction_name,date,depth_level,substrate,bloom_stage)
+
+```
+
+## Arranging the water and ice depths, and size fractions
+```{r fig.height=10, fig.width=18}
+long$fraction_name<-factor(long$fraction_name, levels=c("pico", "nano", "micro"))
+long$trophic_mode<-factor(long$trophic_mode, levels=trophicMode)
+long$depth_level<-factor(long$depth_level, levels=c("ICE_1","ICE_0", "WATER_1","WATER_2", "WATER_3", "WATER_4"))
+long$date <- lubridate::ymd(long$date)
+```
+
+# Environmental variables
+
+## map
+```{r fig.height=10, fig.width=18}
+# import world map
+world <- map_data("world")
+
+plot_map<-ggplot() +
+  geom_map(data=world,
+           map=world,
+           aes(long,lat,map_id=region),
+            color="darkgrey", fill="#F2F2F2") +
+  coord_map("ortho", ylim=c(55,85), xlim=c(-120,0)) +
+  scale_x_continuous(breaks = seq(-180, 180, by = 5)) +
+  scale_y_continuous(breaks= seq(0,90, by=5)) +
+  geom_hline(yintercept=66, color="#0072B2", linetype="dashed") +
+  theme(axis.text=element_blank(), #remove axis labels
+        axis.ticks=element_blank(),
+        axis.title=element_blank(), # remove axis title
+        panel.border = element_rect(color="black", fill=NA, size=0.5),
+        panel.background = element_rect(fill="#cdebf9"),
+        panel.grid=element_line(size=0.4)) +# long and lat line size
+    geom_point( aes(x = -63.78953333, y = 67.47973333), inherit.aes = FALSE, color = "red", size = 3) 
+plot_map
+
+
+pdf("./GE_IC_functional_figs/main_map.pdf", height=12, width=18); plot(plot_map); dev.off() 
+
+
+
+```
+
+## metadata - Bacteria
+```{r fig.height=10, fig.width=18}
+bacteria <- read_csv("./metadata/GE_IC_bacteria.csv") %>% 
+  filter(mission == "ice_camp_2016", sample_type %in% c("water", "ice"), depth_level!="Under Ice") %>% 
+  filter(cytoplankton == "bacteria" & cyto_type %in% c ("LBact","HBact")) 
+
+bacteria_water <- bacteria %>% 
+  filter(sample_type == "water") %>% 
+  filter(depth_m <= 60) %>%
+  group_by(sample_label,date) %>% 
+  summarize(integrated_conc=sum(nb_cell_ml)) %>%
+  group_by(date) %>%
+  summarize(integrated_conc=mean(integrated_conc)) %>%
+  mutate(sample_type="water")
+
+bacteria_ice <- bacteria %>% 
+  filter(sample_type == "ice") %>% 
+  group_by(sample_label,date) %>% 
+  summarize(integrated_conc=sum(nb_cell_ml)) %>%
+  group_by(date) %>%
+  summarize(integrated_conc=mean(integrated_conc)) %>%
+  mutate(sample_type="ice")
+
+bacteria_conc <- bind_rows(bacteria_ice, bacteria_water)
+bacteria_conc$date <- lubridate::ymd(bacteria_conc$date)
+
+plot_bacteria_conc <- ggplot(bacteria_conc,aes(x = date, y = integrated_conc, color=sample_type)) +
+  geom_vline(xintercept = as.numeric(as.Date("2016-06-03")), linetype = "dashed", size=1, alpha=0.5) +
+  geom_vline(xintercept = as.numeric(as.Date("2016-06-15")), linetype = "dashed", size=1, alpha=0.5) +
+  geom_line(data=bacteria_conc,show.legend = FALSE,size = 1) +
+  geom_point(data=bacteria_conc,show.legend = FALSE, size = 3) +
+   scale_y_log10(limits=c(10000,1000000),breaks = scales::trans_breaks("log10", function(x) 10^x), 
+                 labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  annotation_logticks(sides = "l") +
+  xlab(NULL) +
+  ylab(bquote("Bacterial concentration ("*cells~ml^{-1}*")")) +
+  theme_bw() + 
+  theme(axis.text=element_text(size=22),
+        axis.title=element_text(size=22,face="bold"),
+        axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        panel.grid = element_blank()) + 
+  scale_color_manual(values = c("ice" = "#1261A0", "water" = "#48aaad")) +
+  scale_x_date(limits=c(as.Date("2016-05-01"),as.Date("2016-07-25"))) + 
+  geom_dl(aes(label = sample_type), method = list(dl.trans(x = x + 0.5), dl.combine("last.points"),cex=2))
+
+plot_bacteria_conc
+
+```
+
+## metadata - zooplankton
+```{r fig.height=10, fig.width=18}
+zooplankton <- read.csv("./metadata/GE_IC_zooplankton.csv") %>%
+  select(-X) %>%
+  filter(object_depth_max==350) %>%
+  group_by(sampling_date) %>%
+  summarize(zooplankton_conc = sum(concentration_ind_m3)) %>%
+  mutate(sampling_date = lubridate::ymd(sampling_date)) 
+
+plot_zooplankton <- ggplot(zooplankton, aes(x = sampling_date, y = zooplankton_conc)) +
+  geom_vline(xintercept = as.numeric(as.Date("2016-06-03")), linetype = "dashed", size=1, alpha=0.5) +
+  geom_vline(xintercept = as.numeric(as.Date("2016-06-15")), linetype = "dashed", size=1, alpha=0.5) +
+  geom_line(data=zooplankton,show.legend = FALSE,size = 1,color="black") +
+  geom_point(data=zooplankton,show.legend = FALSE, size = 3,color="black") +
+  ylab(bquote("Zooplankton concentration ("*Ind~m^{-3}*")")) +
+  ylim(0,200) +
+  theme_bw() + 
+  theme(axis.text=element_text(size=22),
+        axis.title=element_text(size=22,face="bold"),
+        axis.text.x=element_text(angle=45,hjust = 1),
+        axis.title.x=element_blank(),
+        panel.grid = element_blank()) + 
+  scale_x_date(limits=c(as.Date("2016-05-01"),as.Date("2016-07-25")), date_labels = "%B %d", breaks=c(as.Date("2016-05-01"),as.Date("2016-06-03"),as.Date("2016-06-15"),as.Date("2016-07-22")))
+
+plot_zooplankton
+
+pdf("./GE_IC_functional_figs/main_environmental.pdf", height=8, width=22); plot(plot_bacteria_conc/plot_zooplankton); dev.off() 
+
+
+```
+
+# DNA and RNA metabarcoding
+## change back to categorical for plotting
+```{r fig.height=10, fig.width=18}
+sampling_dates<-c("2016-05-09","2016-05-23","2016-05-30","2016-06-06","2016-06-13","2016-06-20","2016-06-27","2016-07-06","2016-07-18")
+sampling_dates_plot<-c("May 09","May 23","May 30","Jun 06","Jun 13","Jun 20","Jun 27","Jul 06","Jul 18")
+
+long$date <- factor(long$date, levels=sampling_dates)
+
+long$date<-str_replace(long$date,"2016-05-","May ")
+long$date<-str_replace(long$date,"2016-06-","Jun ")
+long$date<-str_replace(long$date,"2016-07-","Jul ")
+long$date <- factor(long$date, levels=sampling_dates_plot)
+```
+
+
+
+## RNA DNA comparison
+```{r fig.height=12, fig.width=18}
+
+long_RNA <- long %>% 
+  filter(DNA_RNA=="RNA")
+
+long_DNA <- long %>% 
+  filter(DNA_RNA=="DNA")
+
+length(unique(long_RNA$asv_code))
+length(unique(long_DNA$asv_code))
+length(unique(long$asv_code))
+
+RNA_richness <- long_RNA %>%
+  group_by(division,class,asv_code) %>%
+  summarize(RNA_reads=sum(n_reads)) %>%
+  group_by(class) %>%
+  summarize(RNA_richness=n()) %>%
+  arrange(RNA_richness)
+
+RNA_richness_div <- long_RNA %>%
+  group_by(division,asv_code) %>%
+  summarize(RNA_reads=sum(n_reads)) %>%
+  group_by(division) %>%
+  summarize(RNA_richness=n()) %>%
+  arrange(desc(RNA_richness))
+
+DNA_richness <- long_DNA %>%
+  group_by(class,asv_code) %>%
+  summarize(DNA_reads=sum(n_reads)) %>%
+  group_by(class) %>%
+  summarize(DNA_richness=n())
+
+richness <- left_join(RNA_richness,DNA_richness, by="class") %>%
+  rename(RNA=RNA_richness,DNA=DNA_richness) %>%
+  pivot_longer(cols=c(RNA,DNA),names_to = "DNARNA",values_to = "ASV_richness") %>%
+  filter(ASV_richness>3) %>%
+  left_join(taxa%>%select(division,class)%>%distinct(division,class),by="class") %>%
+  arrange(ASV_richness)
+
+plot_order_class <- unique(richness$class)
+richness$class <-factor(richness$class,levels=plot_order_class)
+plot_order_division <- unique(RNA_richness_div$division)
+richness$division <-factor(richness$division,levels=plot_order_division)
+
+plot_richness <- ggplot(richness,aes(x=-ASV_richness,y=class,fill=DNARNA)) + 
+  geom_bar(stat = "identity",  width = 0.9,  color="black",
+           position=position_dodge(width = 0.8)) +
+  scale_fill_manual(values=c("#B87800","#004E8A"),breaks=c("RNA","DNA")) +
+  theme_bw() +
+  theme(text=element_text(size=24),
+        panel.grid=element_blank(),
+        axis.text.x = element_text(hjust=1,angle=45)) +
+  facet_grid(rows=vars(division),scales="free_y",space="free_y") + 
+  scale_x_continuous(breaks = seq(0, -300, by = -25),  # y axis values (before coord_flip) 
+                     labels = seq(0,  300, by =  25))
+
+plot_richness
+
+
+total_RNA_reads <- sum(long_RNA$n_reads)
+total_DNA_reads <- sum(long_DNA$n_reads)
+
+RNA_reads <- long_RNA %>%
+  group_by(class) %>%
+  summarize(RNA_reads=sum(n_reads)) %>%
+  mutate(RNA_reads=RNA_reads/total_RNA_reads*100)
+
+
+DNA_reads <- long_DNA %>%
+  group_by(class) %>%
+  summarize(DNA_reads=sum(n_reads)) %>%
+  mutate(DNA_reads=DNA_reads/total_DNA_reads*100)
+
+reads <- left_join(RNA_reads,DNA_reads, by="class") %>%
+  rename(RNA=RNA_reads,DNA=DNA_reads) %>%
+  pivot_longer(cols=c(RNA,DNA),names_to = "DNARNA",values_to = "ASV_reads") %>%
+  left_join(taxa%>%select(division,class)%>%distinct(division,class),by="class") %>%
+  arrange(ASV_reads)  %>%  
+  filter(class %in% richness$class)
+
+plot_order_class <- unique(richness$class)
+reads$class <-factor(reads$class,levels=plot_order_class)
+plot_order_division <- unique(RNA_richness_div$division)
+reads$division <-factor(reads$division,levels=plot_order_division)
+
+plot_reads <- ggplot(reads,aes(x=ASV_reads,y=class,fill=DNARNA)) + 
+  geom_bar(stat = "identity",  width = 0.9, color="black",
+           position=position_dodge(width = 0.8)) +
+  scale_fill_manual(values=c("#B87800","#004E8A"),breaks=c("RNA","DNA")) +
+  theme_bw() +
+  theme(text=element_text(size=24),
+        panel.grid=element_blank(),
+        axis.text.x = element_text(hjust=1,angle=45)) +
+  facet_grid(rows=vars(division),scales="free_y",space="free_y") + 
+  scale_x_continuous(breaks = seq(0, 100, by = 2),  # y axis values (before coord_flip) 
+                     labels = seq(0, 100, by = 2))
+
+
+plot_reads
+
+pdf("./GE_IC_functional_figs/supplementary_DNARNA_comparison.pdf", height=22, width=26); plot(plot_richness + plot_reads); dev.off() 
+ 
+```
+## RNA:DNA ratio
+```{r fig.height=12, fig.width=18}
+#sample_name is used to match RNA to DNA samples
+samples_DNARNA <- intersect(unique(long_DNA$sample_name),unique(long_RNA$sample_name))
+asv_DNARNA <- intersect(unique(long_DNA$asv_code),unique(long_RNA$asv_code))
+
+long_DNARNA<- long %>% 
+  filter(asv_code %in% asv_DNARNA) %>%
+  filter(sample_name %in% samples_DNARNA) %>%
+  filter(n_reads >= 10)
+
+length(unique(long_DNARNA$asv_code))
+
+long_DNARNA$functional_trait<-factor(long_DNARNA$functional_trait, levels=functionalTraits)
+
+p_long_DNARNA <- long_DNARNA %>% 
+  group_by(substrate,DNA_RNA,date,functional_trait) %>% 
+  summarize(n_reads=sum(n_reads)) 
+
+p_long_DNARNA$functional_trait <- factor(p_long_DNARNA$functional_trait,levels=functionalTraits)
+
+p_DNARNA <- ggplot(p_long_DNARNA, aes(x=date, y=n_reads, fill=functional_trait)) + 
+  geom_bar(position="fill", stat="identity", color="black",size=0.3) + 
+  theme_bw() +
+  theme(text=element_text(size=22),
+        axis.text.x = element_text(angle = 90, hjust=1,vjust=1),
+        axis.title.x=element_blank(),
+        legend.title=element_blank(),
+        panel.spacing.x=unit(2, "lines"),
+        panel.spacing.y=unit(1, "lines"), 
+        plot.margin = unit(c(0,0,3,0), "cm"),
+        panel.grid=element_blank(),
+        strip.background=element_blank(),
+        legend.key.size=unit(2,"line")) +
+  ylab("Proportion of DNA reads") +
+ scale_y_continuous(labels=scales::percent, breaks = seq(0,1, by=0.5)) +
+  facet_grid(cols=vars(DNA_RNA), rows=vars(substrate), scales="free_x") +
+  scale_fill_manual(values=functionalPalette, breaks=functionalTraits)
+p_DNARNA 
+
+pdf("./GE_IC_functional_figs/main_DNARNA.pdf", height=12, width=18); plot(p_DNARNA); dev.off() 
+
+
+sample_DNA <- sample %>%
+  filter(DNA_RNA=="DNA")
+
+DNARNA<-long_DNARNA %>% 
+  pivot_wider(id_cols=c("sample_name","asv_code"),names_from=DNA_RNA,values_from=n_reads) %>%
+  mutate(ratio=log(RNA/DNA)) %>% #this is where I log
+  drop_na() %>%
+  left_join(taxa,by="asv_code") %>%
+  left_join(sample_DNA,by="sample_name")
+
+DNARNA_ratio <- DNARNA %>%
+  group_by(bloom_stage,substrate,fraction_name,functional_trait,asv_code) %>%
+  summarize(ratio=mean(ratio)) %>%
+  left_join(taxa %>% select(asv_code,species,genus,family,order,class,division),by="asv_code")
+
+DNARNA_ratio$functional_trait<-factor(DNARNA_ratio$functional_trait, levels=functionalTraits)
+DNARNA_ratio$fraction_name<-factor(DNARNA_ratio$fraction_name, levels=c("pico","nano","micro"))
+
+DNARNA_ratio <- DNARNA_ratio %>% filter(functional_trait!="Invertebrate_parasite")
+
+DNARNA_Scatter <- ggplot(data=DNARNA_ratio, mapping=aes(x=bloom_stage,y=ratio,color=functional_trait)) +
+  geom_boxplot(width=0.4, outlier.shape=TRUE, aes(middle=mean(ratio))) +
+  ylab("Log(RNA/DNA)") +
+  geom_hline(yintercept=0, color="darkred", linetype=2,alpha=0.7) +
+  theme_bw() +
+  theme(text=element_text(size=20),
+        panel.grid=element_blank(),
+        axis.text.x = element_text(hjust=1),
+        strip.background=element_blank(),
+        legend.position = "none") +
+  facet_grid(rows=vars(substrate), cols=vars(functional_trait), scales="free_x") + 
+  scale_color_manual(values=functionalPalette, breaks = functionalTraits) +
+  scale_y_continuous(breaks=seq(-4,4,1)) + 
+  scale_x_discrete(labels=c('I','II','III'))
+
+DNARNA_Scatter
+pdf("./GE_IC_functional_figs/main_DNARNA_ratio.pdf", height=12, width=18); plot(DNARNA_Scatter); dev.off() 
+
+
+DNARNA_functional <- ggplot(data=DNARNA_ratio, mapping=aes(x=functional_trait,y=ratio,color=functional_trait)) +
+  geom_boxplot(width=0.4, outlier.shape=TRUE, aes(middle=mean(ratio))) +
+  ylab("Log(RNA/DNA)") +
+  geom_hline(yintercept=0, color="darkred", linetype=2,alpha=0.7) +
+  theme_bw() +
+  theme(text=element_text(size=20),
+        panel.grid=element_blank(),
+        axis.text.x = element_text(hjust=1,angle=45),
+        strip.background=element_blank(),
+        legend.position = "none") +
+  facet_grid(rows=vars(substrate), scales="free_x") + 
+  scale_color_manual(values=functionalPalette, breaks = functionalTraits) +
+  scale_y_continuous(breaks=seq(-4,4,1))
+
+DNARNA_functional
+
+pdf("./GE_IC_functional_figs/supplementary_DNARNA_functional.pdf", height=12, width=8); plot(DNARNA_functional); dev.off() 
+help <- DNARNA_ratio %>% filter(substrate=="ice",functional_trait=="Phototroph")
+mean(help$ratio)
+
+help <- DNARNA_ratio %>% filter(substrate=="water",functional_trait=="Phototroph")
+mean(help$ratio)
+
+```
+
+## Mixotrophy RNA/DNA ratio 
+
+```{r}
+DNARNA_mixo <- DNARNA_ratio %>% 
+  filter(functional_trait=="Mixotroph")
+
+DNARNA_mixo$mixotrophy_type <- ifelse(DNARNA_mixo$class=="Spirotrichea", "NonCM", "CM")
+
+DNARNA_mixo_plot <- ggplot(data=DNARNA_mixo, mapping=aes(x=bloom_stage,y=ratio, fill=mixotrophy_type)) +
+  geom_boxplot(width=0.4, outlier.shape=TRUE, aes(middle=mean(ratio)),alpha=0.8) +
+  ylab("Log(RNA/DNA)") +
+  geom_hline(yintercept=0, color="darkred", linetype=2,alpha=0.7) +
+  theme_bw() +
+  theme(text=element_text(size=20),
+        legend.title = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid=element_blank(),
+        axis.text.x = element_text(hjust=1,angle=45),
+        strip.background=element_blank()) +
+    facet_grid(rows=vars(substrate), scales="free_x") + 
+  scale_y_continuous(breaks=seq(-4,4,1)) +
+  scale_fill_manual(values=c("#B87800","#004E8A"),breaks=c("CM","NonCM"))
+
+DNARNA_mixo_plot
+
+pdf("./GE_IC_functional_figs/supplementary_DNARNA_mixo.pdf", height=12, width=10); plot(DNARNA_mixo_plot); dev.off() 
+
+for(i in c("Stage_I","Stage_II","Stage_III")){
+stat <- DNARNA_mixo %>%
+  filter(substrate=="ice",bloom_stage==i) 
+kruskal.test(ratio~mixotrophy_type,stat)
+test<- pairwise.wilcox.test(stat$ratio, stat$mixotrophy_type)$p.value
+print(str_c(i," Pairwise wilcox test results",test))
+}
+
+for(i in c("Stage_I","Stage_II","Stage_III")){
+stat <- DNARNA_mixo %>%
+  filter(substrate=="water",bloom_stage==i) 
+kruskal.test(ratio~mixotrophy_type,stat)
+test<- pairwise.wilcox.test(stat$ratio, stat$mixotrophy_type)$p.value
+print(str_c(i," Pairwise wilcox test results",test))
+}
+```
+
+## ANOVA for every functional group
+```{r fig.height=12, fig.width=20}
+
+for (i in functionalTraits[!functionalTraits=="Invertebrate_parasite"]){
+
+stat <- DNARNA_ratio %>%
+  filter(functional_trait==i, substrate=="ice") 
+
+kruskal.test(ratio~bloom_stage,stat)
+test<- pairwise.wilcox.test(stat$ratio, stat$bloom_stage)$p.value
+
+print(str_c(i," Pairwise wilcox test results"))
+df <- data.frame(expand.grid(dimnames(test)),array(test))
+print(na.omit(df))
+}
+
+
+for (i in functionalTraits[!functionalTraits=="Invertebrate_parasite"]){
+
+stat <- DNARNA_ratio %>%
+  filter(functional_trait==i, substrate=="water") 
+
+kruskal.test(ratio~bloom_stage,stat)
+test<- pairwise.wilcox.test(stat$ratio, stat$bloom_stage)$p.value
+
+print(str_c(i," Pairwise wilcox test results"))
+df <- data.frame(expand.grid(dimnames(test)),array(test))
+print(na.omit(df))
+}
+
+# Hung suggests saving everything in a list and then use lapply to print
+
+for (i in functionalTraits[!functionalTraits=="Invertebrate_parasite"]){
+
+stat <- DNARNA_ratio %>%
+  filter(functional_trait==i) 
+
+kruskal.test(ratio~substrate,stat)
+test<- pairwise.wilcox.test(stat$ratio, stat$substrate)$p.value
+
+print(str_c(i," Pairwise wilcox test results"))
+df <- data.frame(expand.grid(dimnames(test)),array(test))
+print(na.omit(df))
+}
+```
+
+
+## Ordination Plot to check for clustering of samples (DNA)
+```{r fig.height12, fig.width=20}
+
+ord_RNA <- ordinate(ps_RNA, "NMDS", "bray")
+
+p_RNA_nmds <- plot_ordination(ps_RNA, ord_RNA, type="sample", color="cluster", shape="fraction_name") + 
+  geom_point(size=6) + 
+  scale_color_manual(values=nmdsPalette) +
+  theme_bw() +
+  annotate("text", x=1.2, y=1.5, label=str_c("Stress = ",round(ord_RNA$stress,4)),size=8) +
+  theme(axis.text=element_text(size=22),
+        axis.title=element_text(size=22,face="bold"),
+        legend.text = element_text(size=22),
+        legend.title = element_text(size=22),
+        panel.grid = element_blank(),
+        text = element_text(size = 22))
+
+p_RNA_nmds
+
+pdf("./GE_IC_functional_figs/supplementary_RNA_nmds.pdf", height=12, width=20); plot(p_RNA_nmds); dev.off() 
+
+cluster = get_variable(ps_RNA, "fraction_name")
+cluster_ano = anosim(phyloseq::distance(ps_RNA,"bray"),cluster)
+print(str_c("ANOSIM size fraction | R = ",round(cluster_ano$statistic,4)," | p = ",cluster_ano$signif))
+
+cluster = get_variable(ps_RNA, "substrate")
+cluster_ano = anosim(phyloseq::distance(ps_RNA,"bray"),cluster)
+print(str_c("ANOSIM substrate | R = ",round(cluster_ano$statistic,4)," | p = ",cluster_ano$signif))
+
+ps_RNA_ice<-subset_samples(ps_RNA, substrate=="ice")
+cluster = get_variable(ps_RNA_ice, "bloom_stage")
+cluster_ano = anosim(phyloseq::distance(ps_RNA_ice,"bray"),cluster)
+print(str_c("ANOSIM Ice Bloom_stage | R = ",round(cluster_ano$statistic,4)," | p = ",cluster_ano$signif))
+cluster = get_variable(ps_RNA_ice, "fraction_name")
+cluster_ano = anosim(phyloseq::distance(ps_RNA_ice,"bray"),cluster)
+print(str_c("ANOSIM Ice size fraction | R = ",round(cluster_ano$statistic,4)," | p = ",cluster_ano$signif))
+
+ps_RNA_water<-subset_samples(ps_RNA, substrate=="water")
+cluster = get_variable(ps_RNA_water, "bloom_stage")
+cluster_ano = anosim(phyloseq::distance(ps_RNA_water,"bray"),cluster)
+print(str_c("ANOSIM Water Bloom_stage | R = ",round(cluster_ano$statistic,4)," | p = ",cluster_ano$signif))
+
+cluster = get_variable(ps_RNA_water, "fraction_name")
+cluster_ano = anosim(phyloseq::distance(ps_RNA_water,"bray"), cluster)
+print(str_c("ANOSIM Water size fraction | R = ",round(cluster_ano$statistic,4)," | p = ",cluster_ano$signif))
+
+
+# Try permanova?
+```
+# Metabarcoding
+## Taxonomic assignment confidence (bootstrap)
+```{r fig.height=14, fig.width=20}
+
+confidence <- taxa %>%
+  group_by(confident_boot) %>%
+  summarize(counts=n()) %>%
+  mutate(proprotion=counts/nrow(taxa)*100) %>%
+  arrange(factor(confident_boot,levels=taxon_levels))
+
+```
+
+#Substrate specificity
+
+```{r fig.height=6, fig.width=16}
+
+#wide_RNA <- long_RNA %>% 
+#pivot_wider(id_cols=c(sample_name,substrate),names_from=asv_code, values_from=n_reads,values_fill=0)
+#abund<-wide_RNA[,-c(1:2)]
+#substrate<-wide_RNA$substrate
+#inv <- multipatt(abund, substrate, func="IndVal.g",control=how(nperm=9999))
+#summary(inv, indvalcomp = TRUE)
+#options(max.print=10000)
+#The above data was manually converted into csv and excel 
+
+# results saved in GE_IC_indicspecies.xlsx
+
+
+
+```
+
+## DNA and RNA - Plot functional traits
+```{r fig.height=10, fig.width=16}
+long_DNA <- subset(long, DNA_RNA=="DNA")
+long_DNA$trophic_mode<-factor(long_DNA$trophic_mode, levels=trophicMode)
+
+long_func <- long_DNA %>% group_by(fraction_name,depth_level,date,functional_trait) %>% summarize(n_reads=sum(n_reads))
+long_func$functional_trait <- factor(long_func$functional_trait,levels=functionalTraits)
+
+p <- ggplot(long_func, aes(x=date, y=n_reads, fill=functional_trait)) + 
+  geom_bar(position="fill", stat="identity", color="black",size=0.3) + 
+  theme_bw() +
+  theme(text=element_text(size=22),
+        axis.text.x = element_text(angle = 90, hjust=1),
+        axis.title.x=element_blank(),
+        legend.title=element_blank(),
+        panel.spacing.x=unit(2, "lines"),
+        panel.spacing.y=unit(1, "lines"), 
+        plot.margin = unit(c(0,0,3,0), "cm"),
+        panel.grid=element_blank(),
+        strip.background=element_blank(),
+        legend.key.size=unit(2,"line")) +
+  ylab("Proportion of DNA reads") +
+ scale_y_continuous(labels=scales::percent, breaks = seq(0,1, by=0.5)) +
+  facet_grid(cols = vars(fraction_name), rows=vars(depth_level), scales="free_x") +
+  scale_fill_manual(values=functionalPalette, breaks=functionalTraits)
+p 
+
+pdf("./GE_IC_functional_figs/main_DNA_functional.pdf", height=24, width=18); plot(p); dev.off() 
+
+long_RNA <- subset(long, DNA_RNA=="RNA")
+long_RNA$trophic_mode<-factor(long_RNA$trophic_mode, levels=trophicMode)
+
+long_func <- long_RNA %>% group_by(fraction_name,depth_level,date,functional_trait) %>% summarize(n_reads=sum(n_reads))
+long_func$functional_trait <- factor(long_func$functional_trait,levels=functionalTraits)
+
+p <- ggplot(long_func, aes(x=date, y=n_reads, fill=functional_trait)) + 
+  geom_bar(position="fill", stat="identity", color="black",size=0.3) + 
+  theme_bw() +
+  theme(text=element_text(size=22),
+        axis.text.x = element_text(angle = 90, hjust=1),
+        axis.title.x=element_blank(),
+        legend.title=element_blank(),
+        panel.spacing.x=unit(2, "lines"),
+        panel.spacing.y=unit(1, "lines"), 
+        plot.margin = unit(c(0,0,3,0), "cm"),
+        panel.grid=element_blank(),
+        strip.background=element_blank(),
+        legend.key.size=unit(2,"line")) +
+  ylab("Proportion of RNA reads") +
+ scale_y_continuous(labels=scales::percent, breaks = seq(0,1, by=0.5)) +
+  facet_grid(cols = vars(fraction_name), rows=vars(depth_level), scales="free_x") +
+  scale_fill_manual(values=functionalPalette, breaks=functionalTraits)
+p 
+
+pdf("./GE_IC_functional_figs/main_RNA_functional.pdf", height=20, width=18); plot(p); dev.off() 
+```
+
+## RNA - tree maps for ice and water functional traits
+```{r fig.height=10, fig.width=16}
+
+long_func_ice_1 <- long_RNA %>% 
+  filter(bloom_stage=="Stage_I" & substrate=="ice") %>%
+  group_by(functional_trait,order) %>% 
+  summarize(n_reads=sum(n_reads)) 
+p_func_ice_1 <- phyloseq_long_treemap_functionaltrait(long_func_ice_1,functional_trait,order,"")
+
+long_func_ice_2 <- long_RNA %>% 
+  filter(bloom_stage=="Stage_II" & substrate=="ice") %>%
+  group_by(functional_trait,order) %>% 
+  summarize(n_reads=sum(n_reads)) 
+p_func_ice_2 <- phyloseq_long_treemap_functionaltrait(long_func_ice_2,functional_trait,order,"")
+
+long_func_ice_3 <- long_RNA %>% 
+  filter(bloom_stage=="Stage_III" & substrate=="ice") %>%
+  group_by(functional_trait,order) %>% 
+  summarize(n_reads=sum(n_reads))
+p_func_ice_3 <- phyloseq_long_treemap_functionaltrait(long_func_ice_3,functional_trait,order,"")
+
+pdf("./GE_IC_functional_figs/supplementary_RNA_tree_ice.pdf", height=10, width=30); plot(p_func_ice_1 + p_func_ice_2 + p_func_ice_3); dev.off() 
+
+
+long_func_water_1 <- long_RNA %>% 
+  filter(bloom_stage=="Stage_I" & substrate=="water") %>%
+  group_by(functional_trait,order) %>% 
+  summarize(n_reads=sum(n_reads)) 
+p_func_water_1 <- phyloseq_long_treemap_functionaltrait(long_func_water_1,functional_trait,order,"")
+
+long_func_water_2 <- long_RNA %>% 
+  filter(bloom_stage=="Stage_II" & substrate=="water") %>%
+  group_by(functional_trait,order) %>% 
+  summarize(n_reads=sum(n_reads))
+p_func_water_2 <- phyloseq_long_treemap_functionaltrait(long_func_water_2,functional_trait,order,"")
+
+long_func_water_3 <- long_RNA %>% 
+  filter(bloom_stage=="Stage_III" & substrate=="water") %>%
+  group_by(functional_trait,order) %>% 
+  summarize(n_reads=sum(n_reads))
+p_func_water_3 <- phyloseq_long_treemap_functionaltrait(long_func_water_3,functional_trait,order,"")
+
+pdf("./GE_IC_functional_figs/supplementary_RNA_tree_water.pdf", height=10, width=30); plot(p_func_water_1 + p_func_water_2 + p_func_water_3); dev.off() 
+
+```
+
+## Alpha diversity for each functional group
+```{r fig.height=8, fig.width=10}
+
+RNA_diversity <- long_RNA %>% 
+  mutate(sample_functional = str_c(sample_code,"_",functional_trait)) %>%
+  group_by(substrate, sample_code, depth_level, date, asv_code, functional_trait,sample_functional) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  pivot_wider(names_from=asv_code, values_from = n_reads, values_fill = 0)
+
+RNA_diversity_temp <- RNA_diversity %>% 
+  column_to_rownames("sample_functional") %>%
+  select(-substrate,-date,-depth_level,-sample_code,-functional_trait) %>%
+  as.matrix()
+
+shannon <- vegan::diversity(RNA_diversity_temp, index="shannon")
+
+
+RNA_diversity_temporal <- RNA_diversity %>%
+  select(substrate,date,depth_level,sample_functional,functional_trait) %>%
+  data.frame(shannon) %>%
+  group_by(substrate,functional_trait,date) %>%
+  summarize(mean=mean(shannon),sd=sd(shannon,na.rm=TRUE)) %>%
+  filter(functional_trait!="Invertebrate_parasite")
+
+RNA_diversity_temporal$functional_trait <- factor(RNA_diversity_temporal$functional_trait,levels=functionalTraits)
+  
+  
+  plot_diversity <- ggplot(data=RNA_diversity_temporal, mapping=aes(x=date,y=mean,group=functional_trait)) +
+  geom_line(size=0.5, alpha=0.7, aes(color=functional_trait)) +
+  geom_point(size=5, aes(y=mean, fill=functional_trait), pch=21,alpha=0.8) +
+
+#  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd)) +
+  ylab("Shannon index") +
+  theme_bw() +
+  theme(text=element_text(size=24),
+        panel.grid=element_blank(),
+        axis.text.x = element_text(hjust=1,angle=45),
+        axis.title.x = element_blank(),
+        strip.background=element_blank(),
+        legend.position = "none") +
+  facet_grid(rows=vars(substrate), scales="free_x") + 
+  scale_fill_manual(values=functionalPalette, breaks = functionalTraits) +
+  scale_color_manual(values=functionalPalette, breaks = functionalTraits) +
+  scale_y_continuous(breaks=seq(0,4,1)) + 
+  geom_dl(aes(label = functional_trait), method = list(dl.trans(x = x + 0.5), dl.combine("last.points"),cex=1.5))
+
+
+pdf("./GE_IC_functional_figs/supplementary_diversity.pdf", height=14, width=18); plot(plot_diversity); dev.off() 
+
+RNA_overall_richness <- long_RNA %>% 
+  group_by(substrate, asv_code, functional_trait) %>%
+  summarize() %>%
+  group_by(substrate,functional_trait) %>%
+  summarize(ASV_richness=n()) %>%
+  pivot_wider(names_from=substrate,values_from = ASV_richness) %>%
+  arrange(factor(functional_trait, levels = functionalTraits)) 
+
+RNA_overall_diversity <- RNA_diversity %>%
+  select(substrate,date,depth_level,sample_functional,functional_trait) %>%
+  data.frame(shannon) %>%
+  group_by(substrate,functional_trait) %>%
+  summarize(mean=mean(shannon),sd=sd(shannon,na.rm=TRUE)) %>% 
+  mutate_if(is.numeric, round, 2) %>%
+  mutate(temp=str_c(mean," +- ",sd)) %>%
+  select(-mean,-sd) %>%
+  pivot_wider(names_from=substrate,values_from = temp) %>%
+  arrange(factor(functional_trait, levels = functionalTraits)) 
+
+diversity_table <- RNA_overall_diversity %>%
+  left_join(RNA_overall_richness,by="functional_trait") %>%
+  relocate(ice.y,.before=water.x) 
+
+xtable(diversity_table)
+
+```
+
+# RNA NETWORK
+## RNA - Creating artificial compositional samples
+```{r}
+ps_water<-  phyloseq::subset_samples(ps, substrate=="water" & DNA_RNA=="RNA")
+sample_list <- as.data.frame(ps_water@sam_data) %>%
+  group_by(metadata_id)%>%
+  summarize(n=n()) %>%
+  filter(n==3)
+ps_water<-  phyloseq::subset_samples(ps_water, metadata_id%in%sample_list$metadata_id)
+
+ps_water_merged <- merge_samples(ps_water,"metadata_code")
+ps_water_merged@sam_data$fraction_name <- "merged"
+
+ps_water <-  phyloseq::subset_samples(ps, substrate=="water" & DNA_RNA=="RNA")
+ps_water_new <- merge_phyloseq(ps_water,ps_water_merged)
+test<-as.data.frame(ps_water_new@sam_data)
+
+ps_ice<-  phyloseq::subset_samples(ps, substrate=="ice" & DNA_RNA=="RNA")
+sample_list <- as.data.frame(ps_ice@sam_data) %>%
+  group_by(metadata_id)%>%
+  summarize(n=n()) %>%
+  filter(n==3)
+ps_ice<-  phyloseq::subset_samples(ps_ice, metadata_id%in%sample_list$metadata_id)
+
+ps_ice_merged <- merge_samples(ps_ice,"metadata_code")
+ps_ice_merged@sam_data$fraction_name <- "merged"
+
+ps_ice <-  phyloseq::subset_samples(ps, substrate=="ice" & DNA_RNA=="RNA")
+ps_ice_new <- merge_phyloseq(ps_ice,ps_ice_merged)
+
+```
+
+
+## Filter low abundance (>0.05% total reads) and low occurence (at least 15% samples) ASVs in each bloom stage
+```{r}
+long_RNA <- subset(long, DNA_RNA=="RNA")
+
+long_RNA_ice<-subset(long_RNA,substrate=="ice")
+long_RNA_water<-subset(long_RNA,substrate=="water")
+
+long_RNA_water_I <- filter(long_RNA_water,bloom_stage=="Stage_I") 
+asv_norare_water_I_reads <- long_RNA_water_I %>%
+  group_by(asv_code) %>%
+  summarize(n_reads=sum(n_reads)) %>% 
+  filter(n_reads>0.0005*sum(long_func_water_1$n_reads))
+
+long_RNA_water_II <- filter(long_RNA_water,bloom_stage=="Stage_II") 
+asv_norare_water_II_reads <- long_RNA_water_II %>%
+  group_by(asv_code) %>%
+  summarize(n_reads=sum(n_reads)) %>% 
+  filter(n_reads>0.0005*sum(long_func_water_2$n_reads))
+
+long_RNA_water_III <- filter(long_RNA_water,bloom_stage=="Stage_III") 
+asv_norare_water_III_reads <- long_RNA_water_III %>%
+  group_by(asv_code) %>%
+  summarize(n_reads=sum(n_reads)) %>% 
+  filter(n_reads>0.0005*sum(long_func_water_3$n_reads))
+
+long_RNA_ice_I <- filter(long_RNA_ice,bloom_stage=="Stage_I") 
+asv_norare_ice_I_reads <- long_RNA_ice_I %>%
+  group_by(asv_code) %>%
+  summarize(n_reads=sum(n_reads)) %>% 
+  filter(n_reads>0.0005*sum(long_func_ice_1$n_reads))
+
+long_RNA_ice_II <- filter(long_RNA_ice,bloom_stage=="Stage_II") 
+asv_norare_ice_II_reads <- long_RNA_ice_II %>%
+  group_by(asv_code) %>%
+  summarize(n_reads=sum(n_reads)) %>% 
+  filter(n_reads>0.0005*sum(long_func_ice_2$n_reads))
+  
+long_RNA_ice_III <- filter(long_RNA_ice,bloom_stage=="Stage_III") 
+asv_norare_ice_III_reads <- long_RNA_ice_III %>%
+  group_by(asv_code) %>%
+  summarize(n_reads=sum(n_reads)) %>% 
+  filter(n_reads>0.0005*sum(long_func_ice_3$n_reads))
+
+```
+
+## Substrate specificity
+### Calculate how much reads are from opposite substrate specificity (DNA)
+```{r}
+long_RNA_ice<-subset(long_RNA,substrate=="ice")
+long_RNA_water<-subset(long_RNA,substrate=="water")
+
+water_I_ice_only <- long_RNA %>%
+  filter(substrate=="water", specificity=="ice", bloom_stage=="Stage_I") 
+water_I_ice_only_total <- sum(water_I_ice_only$n_reads)
+(water_I_ice_only_total/sum(long_func_water_1$n_reads))*100
+
+water_II_ice_only <- long_RNA %>%
+  filter(substrate=="water", specificity=="ice", bloom_stage=="Stage_II") 
+water_II_ice_only_total <- sum(water_II_ice_only$n_reads)
+(water_II_ice_only_total/sum(long_func_water_2$n_reads))*100
+
+water_III_ice_only <- long_RNA %>%
+  filter(substrate=="water", specificity=="ice", bloom_stage=="Stage_III") 
+water_III_ice_only_total <- sum(water_III_ice_only$n_reads)
+(water_III_ice_only_total/sum(long_func_water_3$n_reads))*100
+
+ice_I_water_only <- long_RNA %>%
+  filter(substrate=="ice", specificity=="water", bloom_stage=="Stage_I") 
+ice_I_water_only_total <- sum(ice_I_water_only$n_reads)
+(ice_I_water_only_total/sum(long_func_ice_1$n_reads))*100
+
+ice_II_water_only <- long_RNA %>%
+  filter(substrate=="ice", specificity=="water", bloom_stage=="Stage_II") 
+ice_II_water_only_total <- sum(ice_II_water_only$n_reads)
+(ice_II_water_only_total/sum(long_func_ice_2$n_reads))*100
+
+ice_III_water_only <- long_RNA %>%
+  filter(substrate=="ice", specificity=="water", bloom_stage=="Stage_III") 
+ice_III_water_only_total <- sum(ice_III_water_only$n_reads)
+(ice_III_water_only_total/sum(long_func_ice_3$n_reads))*100
+
+```
+## RNA size dominance
+```{r}
+dom_size <- long_RNA %>% 
+  group_by(asv_code,fraction_name) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  pivot_wider(names_from=fraction_name, values_from=n_reads, values_fill=0) %>%
+  mutate(sum=sum(micro,nano,pico)) %>%
+  filter(sum>=1) %>%
+  mutate(micro_pct = micro/sum*100,
+         nano_pct = nano/sum*100,
+         pico_pct = pico/sum*100) 
+
+dom_size$RNA_dom_size <- colnames(dom_size[, c("nano", "micro", "pico")])[max.col(dom_size[c("nano", "micro", "pico")], "first")]
+
+taxa <- taxa %>% 
+  left_join(dom_size %>% select(asv_code, RNA_dom_size), by="asv_code")
+
+long_DNA <- long_DNA %>% 
+  left_join(dom_size %>% select(asv_code, RNA_dom_size), by="asv_code")
+
+  test <- long_DNA %>% 
+    filter(is.na(RNA_dom_size)==FALSE, functional_trait=="Phototroph")
+
+phyloseq_long_treemap(test, RNA_dom_size, order,"")
+```
+
+## Phototroph RNA/DNA ratio 
+
+```{r}
+DNARNA_photo <- DNARNA_ratio %>% 
+  filter(functional_trait=="Phototroph") %>%
+  left_join(taxa %>% select(asv_code,RNA_dom_size), by="asv_code")
+
+DNARNA_photo$RNA_dom_size <- factor(DNARNA_photo$RNA_dom_size, levels=c("pico","nano","micro"))
+
+DNARNA_photo_plot <- ggplot(data=DNARNA_photo, mapping=aes(x=bloom_stage,y=ratio, fill=RNA_dom_size)) +
+  geom_boxplot(width=0.4, outlier.shape=TRUE, aes(middle=mean(ratio)),alpha=0.8) +
+  ylab("Log(RNA/DNA)") +
+  geom_hline(yintercept=0, color="darkred", linetype=2,alpha=0.7) +
+  theme_bw() +
+  theme(text=element_text(size=20),
+        legend.title = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid=element_blank(),
+        axis.text.x = element_text(hjust=1,angle=45),
+        strip.background=element_blank()) +
+    facet_grid(rows=vars(substrate), scales="free_x") + 
+  scale_y_continuous(breaks=seq(-4,4,1)) +
+  scale_fill_manual(values=c("#B87800","#004E8A","#A63700"),breaks=c("pico","nano","micro"))
+
+DNARNA_photo_plot
+
+
+pdf("./GE_IC_functional_figs/supplementary_DNARNA_photo.pdf", height=12, width=12); plot(DNARNA_photo_plot); dev.off() 
+
+for(i in c("Stage_I","Stage_II","Stage_III")){
+  i="Stage_I"
+stat <- DNARNA_photo %>%
+  filter(substrate=="ice",bloom_stage==i) 
+kruskal.test(ratio~RNA_dom_size,stat)
+test<- pairwise.wilcox.test(stat$ratio, stat$RNA_dom_size)$p.value
+print(str_c(i," Pairwise wilcox test results",test))
+}
+
+for(i in c("Stage_I","Stage_II","Stage_III")){
+stat <- DNARNA_photo %>%
+  filter(substrate=="water",bloom_stage==i) 
+kruskal.test(ratio~RNA_dom_size,stat)
+test<- pairwise.wilcox.test(stat$ratio, stat$RNA_dom_size)$p.value
+print(str_c(i," Pairwise wilcox test results",test))
+}
+```
+
+## Eukaryvore RNA/DNA ratio 
+
+```{r}
+eukaryvore_list <- c("Ciliophora", "Cercozoa", "Dinoflagellata")
+
+DNARNA_euk <- DNARNA_ratio %>% 
+  filter(functional_trait=="Eukaryvore") %>%
+  left_join(taxa %>% select(asv_code,RNA_dom_size,subdivision), by="asv_code") %>%
+  filter(subdivision %in% eukaryvore_list)
+
+
+
+DNARNA_euk$subdivision <- factor(DNARNA_euk$subdivision, levels=eukaryvore_list)
+
+
+DNARNA_euk_plot <- ggplot(data=DNARNA_euk, mapping=aes(x=bloom_stage,y=ratio, fill=subdivision)) +
+  geom_boxplot(width=0.4, outlier.shape=TRUE, aes(middle=mean(ratio)),alpha=0.8) +
+  ylab("Log(RNA/DNA)") +
+  geom_hline(yintercept=0, color="darkred", linetype=2,alpha=0.7) +
+  theme_bw() +
+  theme(text=element_text(size=20),
+        legend.title = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid=element_blank(),
+        axis.text.x = element_text(hjust=1,angle=45),
+        strip.background=element_blank()) +
+    facet_grid(rows=vars(substrate), scales="free_x") + 
+  scale_y_continuous(breaks=seq(-4,4,1)) +
+  scale_fill_manual(values=c("#B87800","#004E8A","#A63700"),breaks=eukaryvore_list)
+
+DNARNA_euk_plot
+
+
+pdf("./GE_IC_functional_figs/supplementary_DNARNA_euk.pdf", height=12, width=12); plot(DNARNA_euk_plot); dev.off() 
+
+for(i in c("Stage_I","Stage_II","Stage_III")){
+  i="Stage_I"
+stat <- DNARNA_euk %>%
+  filter(substrate=="ice",bloom_stage==i) 
+kruskal.test(ratio~subdivision,stat)
+test<- pairwise.wilcox.test(stat$ratio, stat$subdivision)$p.value
+print(str_c(i," Pairwise wilcox test results",test))
+}
+
+for(i in c("Stage_I","Stage_II","Stage_III")){
+stat <- DNARNA_euk %>%
+  filter(substrate=="water",bloom_stage==i) 
+kruskal.test(ratio~subdivision,stat)
+test<- pairwise.wilcox.test(stat$ratio, stat$subdivision)$p.value
+print(str_c(i," Pairwise wilcox test results",test))
+}
+```
+
+## RNA Network - ICE 
+
+### Stage I - ice
+
+```{r fig.height=24, fig.width=24}
+ps_ice_I <- subset_samples(ps_ice_new, bloom_stage=="Stage_I")
+
+asv_norare_ice_I <- long_RNA_ice %>%
+  filter(bloom_stage=="Stage_I") %>%
+  group_by(asv_code,sample_id) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  group_by(asv_code) %>%
+  count() %>%
+  filter(n>(0.15*length(unique(long_RNA_ice_I$sample_id)))) %>%
+  select(-n) %>%
+  left_join(asv_norare_ice_I_reads,by="asv_code") %>%
+  filter(n_reads!="NA")
+  
+ps_norare_ice_I <- prune_taxa(asv_norare_ice_I$asv_code,ps_ice_I)
+
+
+#ice_I_net<- netConstruct(ps_norare_ice_I, 
+#                              measure = "spieceasi",
+#                              normMethod = "clr",
+#                              zeroMethod = "multRepl",
+#                              thresh = 0.3,
+#                              verbose = 3)
+#
+#saveRDS(ice_I_net,"./GE_IC_functional_figs/RNA_ice_I_net.rds")
+ice_I_net <- readRDS("./GE_IC_functional_figs/RNA_ice_I_net.rds")
+
+#ice_I_net_props <- netAnalyze(ice_I_net, clustMethod = "cluster_fast_greedy")
+#saveRDS(ice_I_net_props,"./GE_IC_functional_figs/RNA_ice_I_net_props.rds")
+
+ice_I_net_props <- readRDS("./GE_IC_functional_figs/RNA_ice_I_net_props.rds")
+
+
+ice_I_hubs <- as.data.frame(ice_I_net_props$hubs$hubs1) %>% 
+  rename(asv_code="ice_I_net_props$hubs$hubs1") %>%
+  left_join(taxa,by="asv_code")
+
+ice_I_cluster_asv <- as.data.frame(ice_I_net_props$clustering$clust1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(cluster="ice_I_net_props$clustering$clust1") %>%
+  left_join(taxa,by="asv_code")
+
+ice_I_degree <- as.data.frame(ice_I_net_props$centralities$degree1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(degree="ice_I_net_props$centralities$degree1")
+
+ice_I_between <- as.data.frame(ice_I_net_props$centralities$between1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(between="ice_I_net_props$centralities$between1")
+
+ice_I_close <- as.data.frame(ice_I_net_props$centralities$close1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(close="ice_I_net_props$centralities$close1")
+
+ice_I_eigen <- as.data.frame(ice_I_net_props$centralities$eigenv1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(eigen="ice_I_net_props$centralities$eigenv1")
+
+ice_I_cluster_asv <- ice_I_cluster_asv %>%
+  left_join(ice_I_degree,by="asv_code") %>%
+  left_join(ice_I_between,by="asv_code") %>%
+  left_join(ice_I_close,by="asv_code") %>%
+  left_join(ice_I_eigen,by="asv_code")%>%
+  left_join(asv_norare_ice_I,by="asv_code")
+
+  ice_tableI<-ice_I_hubs %>%
+  left_join(ice_I_cluster_asv%>%select(asv_code,cluster), by="asv_code") %>%
+  select(asv_code,cluster,class,species,functional_trait,specificity) 
+ 
+
+  xtable(ice_tableI)
+
+
+plot_I_clusters <- ice_I_cluster_asv %>% 
+  group_by(cluster,functional_trait,species) %>%
+  summarize(n_reads=sum(n_reads))
+
+plot_I_clusters$functional_trait<-factor(plot_I_clusters$functional_trait, levels=functionalTraits)
+plot_I_clusters$cluster <- as.character(plot_I_clusters$cluster)
+  
+plot_I_cluster_func <- phyloseq_long_treemap_clusters(plot_I_clusters,cluster,functional_trait,species,"")
+
+```
+
+
+### Stage II - ice
+```{r fig.height=24, fig.width=24}
+ps_ice_II <- subset_samples(ps_ice_new, bloom_stage=="Stage_II")
+
+asv_norare_ice_II <- long_RNA_ice %>%
+  filter(bloom_stage=="Stage_II") %>%
+  group_by(asv_code,sample_id) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  group_by(asv_code) %>%
+  count() %>%
+  filter(n>(0.15*length(unique(long_RNA_ice_II$sample_id)))) %>%
+  select(-n) %>%
+  left_join(asv_norare_ice_II_reads,by="asv_code") %>%
+  filter(n_reads!="NA")
+  
+ps_norare_ice_II <- prune_taxa(asv_norare_ice_II$asv_code,ps_ice_II)
+
+
+#ice_II_net<- netConstruct(ps_norare_ice_II, 
+#                              measure = "spieceasi",
+#                              normMethod = "clr",
+#                              zeroMethod = "multRepl",
+#                              thresh = 0.3,
+#                              verbose = 3)
+#
+#saveRDS(ice_II_net,"./GE_IC_functional_figs/RNA_ice_II_net.rds")
+ice_II_net <- readRDS("./GE_IC_functional_figs/RNA_ice_II_net.rds")
+
+#ice_II_net_props <- netAnalyze(ice_II_net, clustMethod = "cluster_fast_greedy")
+#saveRDS(ice_II_net_props,"./GE_IC_functional_figs/RNA_ice_II_net_props.rds")
+
+ice_II_net_props <- readRDS("./GE_IC_functional_figs/RNA_ice_II_net_props.rds")
+
+
+ice_II_hubs <- as.data.frame(ice_II_net_props$hubs$hubs1) %>% 
+  rename(asv_code="ice_II_net_props$hubs$hubs1") %>%
+  left_join(taxa,by="asv_code")
+
+ice_II_cluster_asv <- as.data.frame(ice_II_net_props$clustering$clust1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(cluster="ice_II_net_props$clustering$clust1") %>%
+  left_join(taxa,by="asv_code")
+
+ice_II_degree <- as.data.frame(ice_II_net_props$centralities$degree1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(degree="ice_II_net_props$centralities$degree1")
+
+ice_II_between <- as.data.frame(ice_II_net_props$centralities$between1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(between="ice_II_net_props$centralities$between1")
+
+ice_II_close <- as.data.frame(ice_II_net_props$centralities$close1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(close="ice_II_net_props$centralities$close1")
+
+ice_II_eigen <- as.data.frame(ice_II_net_props$centralities$eigenv1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(eigen="ice_II_net_props$centralities$eigenv1")
+
+ice_II_cluster_asv <- ice_II_cluster_asv %>%
+  left_join(ice_II_degree,by="asv_code") %>%
+  left_join(ice_II_between,by="asv_code") %>%
+  left_join(ice_II_close,by="asv_code") %>%
+  left_join(ice_II_eigen,by="asv_code")%>%
+  left_join(asv_norare_ice_II,by="asv_code")
+
+  ice_tableII<-ice_II_hubs %>%
+  left_join(ice_II_cluster_asv%>%select(asv_code,cluster), by="asv_code") %>%
+  select(asv_code,cluster,class,species,functional_trait,specificity) 
+ 
+
+  xtable(ice_tableII)
+
+
+plot_II_clusters <- ice_II_cluster_asv %>% 
+  group_by(cluster,functional_trait,species) %>%
+  summarize(n_reads=sum(n_reads))
+
+plot_II_clusters$functional_trait<-factor(plot_II_clusters$functional_trait, levels=functionalTraits)
+plot_II_clusters$cluster <- as.character(plot_II_clusters$cluster)
+  
+plot_II_cluster_func <- phyloseq_long_treemap_clusters(plot_II_clusters,cluster,functional_trait,species,"")
+
+```
+
+### Stage III - ice
+```{r fig.height=24, fig.width=24}
+ps_ice_III <- subset_samples(ps_ice_new, bloom_stage=="Stage_III")
+
+asv_norare_ice_III <- long_RNA_ice %>%
+  filter(bloom_stage=="Stage_III") %>%
+  group_by(asv_code,sample_id) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  group_by(asv_code) %>%
+  count() %>%
+  filter(n>(0.15*length(unique(long_RNA_ice_III$sample_id)))) %>%
+  select(-n) %>%
+  left_join(asv_norare_ice_III_reads,by="asv_code") %>%
+  filter(n_reads!="NA")
+  
+ps_norare_ice_III <- prune_taxa(asv_norare_ice_III$asv_code,ps_ice_III)
+
+
+#ice_III_net<- netConstruct(ps_norare_ice_III, 
+#                              measure = "spieceasi",
+#                              normMethod = "clr",
+#                              zeroMethod = "multRepl",
+#                              thresh = 0.3,
+#                              verbose = 3)
+#
+#saveRDS(ice_III_net,"./GE_IC_functional_figs/RNA_ice_III_net.rds")
+ice_III_net <- readRDS("./GE_IC_functional_figs/RNA_ice_III_net.rds")
+
+#ice_III_net_props <- netAnalyze(ice_III_net, clustMethod = "cluster_fast_greedy")
+#saveRDS(ice_III_net_props,"./GE_IC_functional_figs/RNA_ice_III_net_props.rds")
+
+ice_III_net_props <- readRDS("./GE_IC_functional_figs/RNA_ice_III_net_props.rds")
+
+
+ice_III_hubs <- as.data.frame(ice_III_net_props$hubs$hubs1) %>% 
+  rename(asv_code="ice_III_net_props$hubs$hubs1") %>%
+  left_join(taxa,by="asv_code")
+
+ice_III_cluster_asv <- as.data.frame(ice_III_net_props$clustering$clust1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(cluster="ice_III_net_props$clustering$clust1") %>%
+  left_join(taxa,by="asv_code")
+
+ice_III_degree <- as.data.frame(ice_III_net_props$centralities$degree1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(degree="ice_III_net_props$centralities$degree1")
+
+ice_III_between <- as.data.frame(ice_III_net_props$centralities$between1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(between="ice_III_net_props$centralities$between1")
+
+ice_III_close <- as.data.frame(ice_III_net_props$centralities$close1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(close="ice_III_net_props$centralities$close1")
+
+ice_III_eigen <- as.data.frame(ice_III_net_props$centralities$eigenv1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(eigen="ice_III_net_props$centralities$eigenv1")
+
+ice_III_cluster_asv <- ice_III_cluster_asv %>%
+  left_join(ice_III_degree,by="asv_code") %>%
+  left_join(ice_III_between,by="asv_code") %>%
+  left_join(ice_III_close,by="asv_code") %>%
+  left_join(ice_III_eigen,by="asv_code")%>%
+  left_join(asv_norare_ice_III,by="asv_code")
+
+  ice_tableIII<-ice_III_hubs %>%
+  left_join(ice_III_cluster_asv%>%select(asv_code,cluster), by="asv_code") %>%
+  select(asv_code,cluster,class,species,functional_trait,specificity) 
+ 
+
+  xtable(ice_tableIII)
+
+
+plot_III_clusters <- ice_III_cluster_asv %>% 
+  group_by(cluster,functional_trait,species) %>%
+  summarize(n_reads=sum(n_reads))
+
+plot_III_clusters$functional_trait<-factor(plot_III_clusters$functional_trait, levels=functionalTraits)
+plot_III_clusters$cluster <- as.character(plot_III_clusters$cluster)
+  
+plot_III_cluster_func <- phyloseq_long_treemap_clusters(plot_III_clusters,cluster,functional_trait,species,"")
+
+
+pdf("./GE_IC_functional_figs/supplementary_RNA_ice_clusters.pdf", height=32, width=18) ; plot(plot_I_cluster_func/plot_II_cluster_func/plot_III_cluster_func); dev.off() 
+```
+
+## analyzing ice network data
+
+```{r fig.height=6, fig.width=14}
+ice_I_cluster_asv$stage <- "I"
+ice_II_cluster_asv$stage <- "II"
+ice_III_cluster_asv$stage <- "III"
+
+ice_eigen <- rbind(ice_I_cluster_asv,ice_II_cluster_asv,ice_III_cluster_asv)
+
+ice_eigen$trophic_mode<-factor(ice_eigen$trophic_mode, levels=trophicMode)
+ice_eigen$stage<-factor(ice_eigen$stage, levels=c("I","II","III"))
+ice_eigen$functional_trait<-factor(ice_eigen$functional_trait, levels=functionalTraits)
+
+p_ice_eigen <- ggplot(ice_eigen %>% filter(functional_trait!="Invertebrate_parasite"), aes(x=eigen, y=fct_rev(functional_trait), color=functional_trait)) + 
+  geom_boxplot(width=0.4, outlier.shape=NA) +
+  geom_jitter(width=0.1,alpha=0.5) +
+  theme_bw() +
+  xlab("Eigen centrality") +
+  theme(axis.title.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor=element_blank(),
+        text=element_text(size=16),
+        legend.position="none") +
+   facet_grid(cols = vars(stage)) +
+  scale_color_manual(values=functionalPalette)
+
+p_ice_eigen
+
+pdf("./GE_IC_functional_figs/supplementary_RNA_ice_eigen.pdf", height=7, width=16) ; plot(p_ice_eigen); dev.off() 
+
+
+```
+
+### Co-occurence and co-exclusion summary in ICE Stage I
+```{r fig.height=12, fig.width=7}
+
+self_interaction <- c("Phototroph-Phototroph",
+                      "Mixotroph-Mixotroph",
+                      "Protist_parasite-Protist_parasite",
+                      "Invertebrate_parasite-Invertebrate_parasite",
+                      "Eukaryvore-Eukaryvore",
+                      "Omnivore-Omnivore",
+                      "Bacterivore-Bacterivore",
+                      "Saprophyte-Saprophyte",
+                      "Other_Dinophyceae-Other_Dinophyceae")
+
+
+interactions_I <- ice_I_net$edgelist1 %>%
+  rename(asv_code=v1) %>% 
+  left_join(taxa%>%select(asv_code,functional_trait,species,specificity),by="asv_code") %>%
+  rename(functional.x=functional_trait, x=asv_code, asv_code=v2, species.x=species, specificity.x=specificity) %>%
+  left_join(taxa%>%select(asv_code,functional_trait,species,specificity),by="asv_code") %>%
+  rename(functional.y=functional_trait, y=asv_code, species.y=species, specificity.y=specificity)%>%
+  arrange(desc(asso)) %>%
+  mutate(pos_neg=ifelse(asso>0,"pos","neg"))
+
+ice_I_overall <- interactions_I %>%
+  select(x,y,functional.x,functional.y,asso,pos_neg) %>% 
+  left_join(ice_I_cluster_asv%>%select(asv_code,cluster)%>%rename(x=asv_code), by="x") %>%
+  left_join(ice_I_cluster_asv%>%select(asv_code,cluster)%>%rename(y=asv_code), by="y")
+
+ice_I_overall$hub.x <- ifelse(ice_I_overall$x %in% ice_I_hubs$asv_code, "yes","no")
+ice_I_overall$hub.y <- ifelse(ice_I_overall$y %in% ice_I_hubs$asv_code, "yes","no")
+write.csv(ice_I_overall, "./ice_RNA_I_overall.csv")
+
+interactions_I_pos <-filter(interactions_I, interactions_I$pos_neg=="pos")
+interactions_I_neg <-filter(interactions_I, interactions_I$pos_neg=="neg")
+
+# Create a combined factor representing the pairs, sorted
+sorted_pairings <- factor(apply(interactions_I_pos[, c("functional.x", "functional.y")], 1, function(row) paste(sort(row), collapse = "-")))
+sorted_pairing_pos <- as.data.frame(table(sorted_pairings))
+sorted_pairing_pos$pos_neg <- "pos"
+
+sorted_pairings <- factor(apply(interactions_I_neg[, c("functional.x", "functional.y")], 1, function(row) paste(sort(row), collapse = "-")))
+sorted_pairing_neg <- as.data.frame(table(sorted_pairings))
+sorted_pairing_neg$pos_neg <- "neg"
+
+interactions_I_combined <- rbind(sorted_pairing_pos,sorted_pairing_neg) 
+
+interactions_count <-interactions_I_combined %>%
+  group_by(sorted_pairings) %>%
+  summarize(total=sum(Freq))
+
+interactions_I_combined <- interactions_I_combined %>%
+  left_join(interactions_count,by="sorted_pairings") %>%
+  mutate(pos_pct=(Freq/total)*100) #%>%
+  #filter(total>=10) 
+
+sorted_pairing_levels <- interactions_I_combined %>%
+  filter(pos_neg=="pos") %>%
+  arrange(pos_pct) %>%
+  select(sorted_pairings) 
+
+interactions_I_combined$sorted_pairings <- factor(interactions_I_combined$sorted_pairings,levels=sorted_pairing_levels$sorted_pairings)
+
+p_interactions_ice_I <- ggplot(interactions_I_combined%>%filter(total>=10), aes(x=Freq, y=sorted_pairings, fill=pos_neg)) +
+  geom_bar(position="fill", stat="identity", color="black",size=0.3) + 
+  geom_text(aes(x=Freq, y=sorted_pairings, label=Freq, vjust=0.5),
+                  position=position_fill(vjust=0.5),
+                  size=4, 
+                  show.legend = FALSE, 
+                  family="Helvetica",
+                  color="white") +
+  theme_bw() +
+  theme(text=element_text(size=22),
+        axis.text.x = element_text(angle = 90, hjust=1),
+        axis.title=element_blank(),
+        legend.title=element_blank(),
+        legend.position = "bottom",
+        plot.margin = unit(c(0,0,3,0), "cm"),
+        panel.grid=element_blank(),
+        strip.background=element_blank(),
+        legend.key.size=unit(2,"line")) +
+  scale_fill_manual(values=c("#2f67b1","#bf2c23"),breaks=c("pos","neg"))
+
+interactions_ice_I_binned <- interactions_I_combined %>%
+  mutate(pos_bin = cut(pos_pct, breaks=c(0,10,20,30,40,50,60,70,80,90,100), right=FALSE,include.lowest=TRUE)) %>%
+  mutate(self = ifelse(sorted_pairings%in%self_interaction,"Yes","No")) %>%
+  mutate(pos_bin = sub(",.*","",pos_bin)) 
+
+interactions_ice_I_binned$pos_bin <- str_sub(interactions_ice_I_binned$pos_bin,2)
+
+interactions_ice_I_binned_self <- interactions_ice_I_binned %>%
+  filter(self=="Yes" & pos_neg=="pos") %>%
+  rename(functional_trait = sorted_pairings) %>% 
+  select(functional_trait,total,pos_bin) %>%
+  mutate(functional_trait = sub("-.*", "", functional_trait))
+
+
+ice_I_edges <- interactions_ice_I_binned %>% 
+  filter(self=="No" & pos_neg=="pos") %>% 
+  separate(sorted_pairings,into=c("functional.x", "functional.y"),sep="-") %>%
+  select(functional.x, functional.y, total, pos_bin)
+
+interaction_count <- vector()
+for (i in 1:length(functionalTraits)){
+  count <- ice_I_edges %>% 
+    filter(functional.x == functionalTraits[i] | functional.y == functionalTraits[i])
+  count <- sum(count$total)
+  interaction_count[i] <- count
+}
+
+
+circle_position <- data.frame("circle_position"=c(1:9),
+                              "functional_trait" = functionalTraits,
+                              "interaction_count" = interaction_count)
+
+ice_I_nodes <- long_RNA_ice_I %>%
+  group_by(functional_trait) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  left_join(interactions_ice_I_binned_self, by="functional_trait") %>%
+  left_join(circle_position, by="functional_trait") %>%
+  rename(self=total,self_posbin=pos_bin)
+
+
+ice_I_network <- ice_I_edges %>%
+  left_join(ice_I_nodes%>%rename(functional.x=functional_trait), by="functional.x") %>%
+  rename(self.x=self,self_posbin.x=self_posbin, n_reads.x=n_reads,circle_position.x=circle_position) %>%
+  left_join(ice_I_nodes%>%rename(functional.y=functional_trait), by="functional.y") %>%
+  rename(self.y=self,self_posbin.y=self_posbin, n_reads.y=n_reads, circle_position.y=circle_position) 
+  
+ice_I_network[is.na(ice_I_network)] <- 0
+
+ice_I_network <- ice_I_network %>% 
+  mutate_at(c("pos_bin","self_posbin.x","self_posbin.y"), as.numeric) %>%
+  mutate(n_reads.x=round(n_reads.x*(36/16)), n_reads.y=round(n_reads.y*(36/16)))
+#to make all network node sizes are normalised
+
+write.csv(ice_I_network, "./ice_RNA_I_network.csv")
+
+```
+
+### Co-occurence and co-exclusion summary in ICE Stage II
+
+```{r}
+interactions_II <- ice_II_net$edgelist1 %>%
+  rename(asv_code=v1) %>% 
+  left_join(taxa%>%select(asv_code,functional_trait,species,specificity),by="asv_code") %>%
+  rename(functional.x=functional_trait, x=asv_code, asv_code=v2, species.x=species, specificity.x=specificity) %>%
+  left_join(taxa%>%select(asv_code,functional_trait,species,specificity),by="asv_code") %>%
+  rename(functional.y=functional_trait, y=asv_code, species.y=species, specificity.y=specificity)%>%
+  arrange(desc(asso)) %>%
+  mutate(pos_neg=ifelse(asso>0,"pos","neg"))
+
+ice_II_overall <- interactions_II %>%
+  select(x,y,functional.x,functional.y,asso,pos_neg) %>% 
+  left_join(ice_II_cluster_asv%>%select(asv_code,cluster)%>%rename(x=asv_code), by="x") %>%
+  left_join(ice_II_cluster_asv%>%select(asv_code,cluster)%>%rename(y=asv_code), by="y")
+
+ice_II_overall$hub.x <- ifelse(ice_II_overall$x %in% ice_II_hubs$asv_code, "yes","no")
+ice_II_overall$hub.y <- ifelse(ice_II_overall$y %in% ice_II_hubs$asv_code, "yes","no")
+write.csv(ice_II_overall, "./ice_RNA_II_overall.csv")
+
+interactions_II_pos <-filter(interactions_II, interactions_II$pos_neg=="pos")
+interactions_II_neg <-filter(interactions_II, interactions_II$pos_neg=="neg")
+
+# Create a combined factor representing the pairs, sorted
+sorted_pairings <- factor(apply(interactions_II_pos[, c("functional.x", "functional.y")], 1, function(row) paste(sort(row), collapse = "-")))
+sorted_pairing_pos <- as.data.frame(table(sorted_pairings))
+sorted_pairing_pos$pos_neg <- "pos"
+
+sorted_pairings <- factor(apply(interactions_II_neg[, c("functional.x", "functional.y")], 1, function(row) paste(sort(row), collapse = "-")))
+sorted_pairing_neg <- as.data.frame(table(sorted_pairings))
+sorted_pairing_neg$pos_neg <- "neg"
+
+interactions_II_combined <- rbind(sorted_pairing_pos,sorted_pairing_neg) 
+
+interactions_count <-interactions_II_combined %>%
+  group_by(sorted_pairings) %>%
+  summarize(total=sum(Freq))
+
+interactions_II_combined <- interactions_II_combined %>%
+  left_join(interactions_count,by="sorted_pairings") %>%
+  mutate(pos_pct=(Freq/total)*100) #%>%
+  #filter(total>=10) 
+
+sorted_pairing_levels <- interactions_II_combined %>%
+  filter(pos_neg=="pos") %>%
+  arrange(pos_pct) %>%
+  select(sorted_pairings) 
+
+interactions_II_combined$sorted_pairings <- factor(interactions_II_combined$sorted_pairings,levels=sorted_pairing_levels$sorted_pairings)
+
+p_interactions_ice_II <- ggplot(interactions_II_combined%>%filter(total>=10), aes(x=Freq, y=sorted_pairings, fill=pos_neg)) +
+  geom_bar(position="fill", stat="identity", color="black",size=0.3) + 
+  geom_text(aes(x=Freq, y=sorted_pairings, label=Freq, vjust=0.5),
+                  position=position_fill(vjust=0.5),
+                  size=4, 
+                  show.legend = FALSE, 
+                  family="Helvetica",
+                  color="white") +
+  theme_bw() +
+  theme(text=element_text(size=22),
+        axis.text.x = element_text(angle = 90, hjust=1),
+        axis.title=element_blank(),
+        legend.title=element_blank(),
+        legend.position = "bottom",
+        plot.margin = unit(c(0,0,3,0), "cm"),
+        panel.grid=element_blank(),
+        strip.background=element_blank(),
+        legend.key.size=unit(2,"line")) +
+  scale_fill_manual(values=c("#2f67b1","#bf2c23"),breaks=c("pos","neg"))
+
+interactions_ice_II_binned <- interactions_II_combined %>%
+  mutate(pos_bin = cut(pos_pct, breaks=c(0,10,20,30,40,50,60,70,80,90,100), right=FALSE,include.lowest=TRUE)) %>%
+  mutate(self = ifelse(sorted_pairings%in%self_interaction,"Yes","No")) %>%
+  mutate(pos_bin = sub(",.*","",pos_bin)) 
+
+interactions_ice_II_binned$pos_bin <- str_sub(interactions_ice_II_binned$pos_bin,2)
+
+interactions_ice_II_binned_self <- interactions_ice_II_binned %>%
+  filter(self=="Yes" & pos_neg=="pos") %>%
+  rename(functional_trait = sorted_pairings) %>% 
+  select(functional_trait,total,pos_bin) %>%
+  mutate(functional_trait = sub("-.*", "", functional_trait))
+
+
+ice_II_edges <- interactions_ice_II_binned %>% 
+  filter(self=="No" & pos_neg=="pos") %>% 
+  separate(sorted_pairings,into=c("functional.x", "functional.y"),sep="-") %>%
+  select(functional.x, functional.y, total, pos_bin)
+
+interaction_count <- vector()
+for (i in 1:length(functionalTraits)){
+  count <- ice_II_edges %>% 
+    filter(functional.x == functionalTraits[i] | functional.y == functionalTraits[i])
+  count <- sum(count$total)
+  interaction_count[i] <- count
+}
+
+
+circle_position <- data.frame("circle_position"=c(1:9),
+                              "functional_trait" = functionalTraits,
+                              "interaction_count" = interaction_count)
+
+ice_II_nodes <- long_RNA_ice_II %>%
+  group_by(functional_trait) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  left_join(interactions_ice_II_binned_self, by="functional_trait") %>%
+  left_join(circle_position, by="functional_trait") %>%
+  rename(self=total,self_posbin=pos_bin)
+
+artificial_row <- c("Invertebrate_parasite","Protist_parasite",0,0,1,0,0,4,0,369,0,0,3,5)
+
+ice_II_network <- ice_II_edges %>%
+  left_join(ice_II_nodes%>%rename(functional.x=functional_trait), by="functional.x") %>%
+  rename(self.x=self,self_posbin.x=self_posbin, n_reads.x=n_reads,circle_position.x=circle_position) %>%
+  left_join(ice_II_nodes%>%rename(functional.y=functional_trait), by="functional.y") %>%
+  rename(self.y=self,self_posbin.y=self_posbin, n_reads.y=n_reads, circle_position.y=circle_position) %>%
+  rbind(artificial_row)
+  
+ice_II_network[is.na(ice_II_network)] <- 0
+
+ice_II_network <- ice_II_network %>% 
+  mutate_at(vars(total:interaction_count.y), as.numeric) %>%
+  mutate(n_reads.x=round(n_reads.x*(36/11)), n_reads.y=round(n_reads.y*(36/11)))
+#to make all network node sizes are normalised
+
+write.csv(ice_II_network, "./ice_RNA_II_network.csv")
+```
+
+### Co-occurence and co-exclusion summary in ICE Stage III
+```{r}
+interactions_III <- ice_III_net$edgelist1 %>%
+  rename(asv_code=v1) %>% 
+  left_join(taxa%>%select(asv_code,functional_trait,species,specificity),by="asv_code") %>%
+  rename(functional.x=functional_trait, x=asv_code, asv_code=v2, species.x=species, specificity.x=specificity) %>%
+  left_join(taxa%>%select(asv_code,functional_trait,species,specificity),by="asv_code") %>%
+  rename(functional.y=functional_trait, y=asv_code, species.y=species, specificity.y=specificity)%>%
+  arrange(desc(asso)) %>%
+  mutate(pos_neg=ifelse(asso>0,"pos","neg"))
+
+
+ice_III_overall <- interactions_III %>%
+  select(x,y,functional.x,functional.y,asso,pos_neg) %>% 
+  left_join(ice_III_cluster_asv%>%select(asv_code,cluster)%>%rename(x=asv_code), by="x") %>%
+  left_join(ice_III_cluster_asv%>%select(asv_code,cluster)%>%rename(y=asv_code), by="y")
+
+ice_III_overall$hub.x <- ifelse(ice_III_overall$x %in% ice_III_hubs$asv_code, "yes","no")
+ice_III_overall$hub.y <- ifelse(ice_III_overall$y %in% ice_III_hubs$asv_code, "yes","no")
+write.csv(ice_III_overall, "./ice_RNA_III_overall.csv")
+
+
+interactions_III_pos <-filter(interactions_III, interactions_III$pos_neg=="pos")
+interactions_III_neg <-filter(interactions_III, interactions_III$pos_neg=="neg")
+
+# Create a combined factor representing the pairs, sorted
+sorted_pairings <- factor(apply(interactions_III_pos[, c("functional.x", "functional.y")], 1, function(row) paste(sort(row), collapse = "-")))
+sorted_pairing_pos <- as.data.frame(table(sorted_pairings))
+sorted_pairing_pos$pos_neg <- "pos"
+
+sorted_pairings <- factor(apply(interactions_III_neg[, c("functional.x", "functional.y")], 1, function(row) paste(sort(row), collapse = "-")))
+sorted_pairing_neg <- as.data.frame(table(sorted_pairings))
+sorted_pairing_neg$pos_neg <- "neg"
+
+interactions_III_combined <- rbind(sorted_pairing_pos,sorted_pairing_neg) 
+
+interactions_count <-interactions_III_combined %>%
+  group_by(sorted_pairings) %>%
+  summarize(total=sum(Freq))
+
+interactions_III_combined <- interactions_III_combined %>%
+  left_join(interactions_count,by="sorted_pairings") %>%
+  mutate(pos_pct=(Freq/total)*100) #%>%
+  #filter(total>=10) 
+
+sorted_pairing_levels <- interactions_III_combined %>%
+  filter(pos_neg=="pos") %>%
+  arrange(pos_pct) %>%
+  select(sorted_pairings) 
+
+interactions_III_combined$sorted_pairings <- factor(interactions_III_combined$sorted_pairings,levels=sorted_pairing_levels$sorted_pairings)
+
+p_interactions_ice_III <- ggplot(interactions_III_combined%>%filter(total>=10), aes(x=Freq, y=sorted_pairings, fill=pos_neg)) +
+  geom_bar(position="fill", stat="identity", color="black",size=0.3) + 
+  geom_text(aes(x=Freq, y=sorted_pairings, label=Freq, vjust=0.5),
+                  position=position_fill(vjust=0.5),
+                  size=4, 
+                  show.legend = FALSE, 
+                  family="Helvetica",
+                  color="white") +
+  theme_bw() +
+  theme(text=element_text(size=22),
+        axis.text.x = element_text(angle = 90, hjust=1),
+        axis.title=element_blank(),
+        legend.title=element_blank(),
+        legend.position = "bottom",
+        plot.margin = unit(c(0,0,3,0), "cm"),
+        panel.grid=element_blank(),
+        strip.background=element_blank(),
+        legend.key.size=unit(2,"line")) +
+  scale_fill_manual(values=c("#2f67b1","#bf2c23"),breaks=c("pos","neg"))
+
+interactions_ice_III_binned <- interactions_III_combined %>%
+  mutate(pos_bin = cut(pos_pct, breaks=c(0,10,20,30,40,50,60,70,80,90,100), right=FALSE,include.lowest=TRUE)) %>%
+  mutate(self = ifelse(sorted_pairings%in%self_interaction,"Yes","No")) %>%
+  mutate(pos_bin = sub(",.*","",pos_bin)) 
+
+interactions_ice_III_binned$pos_bin <- str_sub(interactions_ice_III_binned$pos_bin,2)
+
+interactions_ice_III_binned_self <- interactions_ice_III_binned %>%
+  filter(self=="Yes" & pos_neg=="pos") %>%
+  rename(functional_trait = sorted_pairings) %>% 
+  select(functional_trait,total,pos_bin) %>%
+  mutate(functional_trait = sub("-.*", "", functional_trait))
+
+
+ice_III_edges <- interactions_ice_III_binned %>% 
+  filter(self=="No" & pos_neg=="pos") %>% 
+  separate(sorted_pairings,into=c("functional.x", "functional.y"),sep="-") %>%
+  select(functional.x, functional.y, total, pos_bin)
+
+interaction_count <- vector()
+for (i in 1:length(functionalTraits)){
+  count <- ice_III_edges %>% 
+    filter(functional.x == functionalTraits[i] | functional.y == functionalTraits[i])
+  count <- sum(count$total)
+  interaction_count[i] <- count
+}
+
+
+circle_position <- data.frame("circle_position"=c(1:9),
+                              "functional_trait" = functionalTraits,
+                              "interaction_count" = interaction_count)
+
+ice_III_nodes <- long_RNA_ice_III %>%
+  group_by(functional_trait) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  add_row(functional_trait="Invertebrate_parasite",n_reads=1) %>% #artificially add a Invertebrate_parasite node
+  left_join(interactions_ice_III_binned_self, by="functional_trait") %>%
+  left_join(circle_position, by="functional_trait") %>%
+  rename(self=total,self_posbin=pos_bin)
+
+artificial_row <- c("Invertebrate_parasite","Protist_parasite",0,0,1,0,0,4,0,800,1,0,3,4)
+
+ice_III_network <- ice_III_edges %>%
+  left_join(ice_III_nodes%>%rename(functional.x=functional_trait), by="functional.x") %>%
+  rename(self.x=self,self_posbin.x=self_posbin, n_reads.x=n_reads,circle_position.x=circle_position) %>%
+  left_join(ice_III_nodes%>%rename(functional.y=functional_trait), by="functional.y") %>%
+  rename(self.y=self,self_posbin.y=self_posbin, n_reads.y=n_reads, circle_position.y=circle_position) %>%
+  rbind(artificial_row)
+
+
+  
+ice_III_network[is.na(ice_III_network)] <- 0
+
+ice_III_network <- ice_III_network %>% 
+  mutate_at(vars(total:interaction_count.y), as.numeric) %>%
+  mutate(n_reads.x=round(n_reads.x*(36/9)), n_reads.y=round(n_reads.y*(36/9)))
+#to make all network node sizes are normalised
+
+write.csv(ice_III_network, "./ice_RNA_III_network.csv")
+```
+
+### RNA - Ice Interactions between Phototrophs and Eukaryvore
+
+```{r fig.height=10, fig.width=16}
+dom_size_no <- data.frame("RNA_dom_size"=c("pico","nano","micro"),
+                           "grouping"=c("pico-photo","nano-photo","micro-photo"))
+eukaryvore_subdivision <- unique(taxa %>% filter(functional_trait=="Eukaryvore") %>% select(subdivision))
+
+eukaryvore_subdivision <- data.frame(eukaryvore_subdivision,
+                               "grouping"=eukaryvore_subdivision$subdivision)
+
+
+ice_I_photo_euk <- interactions_I %>%
+  filter(functional.x %in% c("Phototroph","Eukaryvore") & 
+           functional.y %in% c("Phototroph","Eukaryvore") & 
+           functional.x != functional.y) %>%
+  left_join(taxa%>%select(asv_code,subdivision,RNA_dom_size)%>%rename(x=asv_code),by="x") %>%
+  left_join(dom_size_no,by="RNA_dom_size") %>%
+  rows_update(eukaryvore_subdivision , by="subdivision", unmatched="ignore") %>%
+  rename(RNA_dom_size.x=RNA_dom_size, subdivision.x=subdivision, grouping.x=grouping) %>%
+  left_join(taxa%>%select(asv_code,subdivision,RNA_dom_size)%>%rename(y=asv_code),by="y") %>%
+  left_join(dom_size_no,by="RNA_dom_size") %>%
+  rows_update(eukaryvore_subdivision , by="subdivision", unmatched="ignore") %>%
+  rename(RNA_dom_size.y=RNA_dom_size, subdivision.y=subdivision, grouping.y=grouping) %>%
+  select(x,y,pos_neg, functional.x, subdivision.x, species.x, RNA_dom_size.x, grouping.x,
+functional.y, subdivision.y, species.y, RNA_dom_size.y, grouping.y)
+
+write.csv(ice_I_photo_euk, "./ice_RNA_I_investigation.csv")
+
+pos <- ice_I_photo_euk %>% filter(pos_neg=="pos")
+sorted_pairings <- factor(apply(pos[, c("grouping.x", "grouping.y")], 1, function(row) paste(sort(row), collapse = "_")))
+sorted_pairing_pos <- as.data.frame(table(sorted_pairings))
+sorted_pairing_pos$pos_neg <- "pos"
+neg <- ice_I_photo_euk %>% filter(pos_neg=="neg")
+sorted_pairings <- factor(apply(neg[, c("grouping.x", "grouping.y")], 1, function(row) paste(sort(row), collapse = "_")))
+sorted_pairing_neg <- as.data.frame(table(sorted_pairings))
+sorted_pairing_neg$pos_neg <- "neg"
+
+interactions_I_combined <- rbind(sorted_pairing_pos,sorted_pairing_neg) 
+
+interactions_count <-interactions_I_combined %>%
+  group_by(sorted_pairings) %>%
+  summarize(total=sum(Freq))
+
+interactions_I_combined <- interactions_I_combined %>%
+  left_join(interactions_count,by="sorted_pairings") %>%
+  mutate(pos_pct=(Freq/total)*100)
+
+sorted_pairing_levels <- interactions_I_combined %>%
+  filter(pos_neg=="pos") %>%
+  arrange(pos_pct) %>%
+  select(sorted_pairings) 
+
+interactions_ice_I_binned <- interactions_I_combined %>%
+  mutate(pos_bin = cut(pos_pct, breaks=c(0,10,20,30,40,50,60,70,80,90,100), right=FALSE,include.lowest=TRUE)) %>%
+  mutate(pos_bin = sub(",.*","",pos_bin)) 
+
+interactions_ice_I_binned$pos_bin <- str_sub(interactions_ice_I_binned$pos_bin,2)
+
+investigation_I <- interactions_ice_I_binned %>% 
+  filter(pos_neg=="pos") %>%
+  separate(sorted_pairings,into=c("grouping.x", "grouping.y"),sep="_") %>%
+  select(grouping.x, grouping.y, total, pos_bin)
+
+grouping_ASV_diversity <- rbind((ice_I_photo_euk %>% select(x,grouping.x) %>% rename(asv_code=x,grouping=grouping.x)),(ice_I_photo_euk %>% select(y,grouping.y) %>% rename(asv_code=y,grouping=grouping.y))) %>%
+  distinct(asv_code,grouping) %>%
+  group_by(grouping) %>%
+  summarize(asv_diversity=length(asv_code))
+
+investigation_I <- investigation_I %>% 
+  left_join(grouping_ASV_diversity %>% rename(grouping.x=grouping), by="grouping.x") %>%
+  rename(asv_diversity.x=asv_diversity) %>%
+  left_join(grouping_ASV_diversity %>% rename(grouping.y=grouping), by="grouping.y") %>%
+  rename(asv_diversity.y=asv_diversity) %>%
+  mutate_at(vars(total:asv_diversity.y), as.numeric) 
+
+write.csv(investigation_I, "./ice_RNA_I_investigation_summary.csv")
+
+
+
+ice_II_photo_euk <- interactions_II %>%
+  filter(functional.x %in% c("Phototroph","Eukaryvore") & 
+           functional.y %in% c("Phototroph","Eukaryvore") & 
+           functional.x != functional.y) %>%
+  left_join(taxa%>%select(asv_code,subdivision,RNA_dom_size)%>%rename(x=asv_code),by="x") %>%
+  left_join(dom_size_no,by="RNA_dom_size") %>%
+  rows_update(eukaryvore_subdivision , by="subdivision", unmatched="ignore") %>%
+  rename(RNA_dom_size.x=RNA_dom_size, subdivision.x=subdivision, grouping.x=grouping) %>%
+  left_join(taxa%>%select(asv_code,subdivision,RNA_dom_size)%>%rename(y=asv_code),by="y") %>%
+  left_join(dom_size_no,by="RNA_dom_size") %>%
+  rows_update(eukaryvore_subdivision , by="subdivision", unmatched="ignore") %>%
+  rename(RNA_dom_size.y=RNA_dom_size, subdivision.y=subdivision, grouping.y=grouping) %>%
+  select(x,y,pos_neg, functional.x, subdivision.x, species.x, RNA_dom_size.x, grouping.x,
+functional.y, subdivision.y, species.y, RNA_dom_size.y, grouping.y)
+
+write.csv(ice_II_photo_euk, "./ice_RNA_II_investigation.csv")
+
+pos <- ice_II_photo_euk %>% filter(pos_neg=="pos")
+sorted_pairings <- factor(apply(pos[, c("grouping.x", "grouping.y")], 1, function(row) paste(sort(row), collapse = "_")))
+sorted_pairing_pos <- as.data.frame(table(sorted_pairings))
+sorted_pairing_pos$pos_neg <- "pos"
+neg <- ice_II_photo_euk %>% filter(pos_neg=="neg")
+sorted_pairings <- factor(apply(neg[, c("grouping.x", "grouping.y")], 1, function(row) paste(sort(row), collapse = "_")))
+sorted_pairing_neg <- as.data.frame(table(sorted_pairings))
+sorted_pairing_neg$pos_neg <- "neg"
+
+interactions_II_combined <- rbind(sorted_pairing_pos,sorted_pairing_neg) 
+
+interactions_count <-interactions_II_combined %>%
+  group_by(sorted_pairings) %>%
+  summarize(total=sum(Freq))
+
+interactions_II_combined <- interactions_II_combined %>%
+  left_join(interactions_count,by="sorted_pairings") %>%
+  mutate(pos_pct=(Freq/total)*100)
+
+sorted_pairing_levels <- interactions_II_combined %>%
+  filter(pos_neg=="pos") %>%
+  arrange(pos_pct) %>%
+  select(sorted_pairings) 
+
+interactions_ice_II_binned <- interactions_II_combined %>%
+  mutate(pos_bin = cut(pos_pct, breaks=c(0,10,20,30,40,50,60,70,80,90,100), right=FALSE,include.lowest=TRUE)) %>%
+  mutate(pos_bin = sub(",.*","",pos_bin)) 
+
+interactions_ice_II_binned$pos_bin <- str_sub(interactions_ice_II_binned$pos_bin,2)
+
+investigation_II <- interactions_ice_II_binned %>% 
+  filter(pos_neg=="pos") %>%
+  separate(sorted_pairings,into=c("grouping.x", "grouping.y"),sep="_") %>%
+  select(grouping.x, grouping.y, total, pos_bin)
+
+grouping_ASV_diversity <- rbind((ice_II_photo_euk %>% select(x,grouping.x) %>% rename(asv_code=x,grouping=grouping.x)),(ice_II_photo_euk %>% select(y,grouping.y) %>% rename(asv_code=y,grouping=grouping.y))) %>%
+  distinct(asv_code,grouping) %>%
+  group_by(grouping) %>%
+  summarize(asv_diversity=length(asv_code))
+
+investigation_II <- investigation_II %>% 
+  left_join(grouping_ASV_diversity %>% rename(grouping.x=grouping), by="grouping.x") %>%
+  rename(asv_diversity.x=asv_diversity) %>%
+  left_join(grouping_ASV_diversity %>% rename(grouping.y=grouping), by="grouping.y") %>%
+  rename(asv_diversity.y=asv_diversity) %>%
+  mutate_at(vars(total:asv_diversity.y), as.numeric) 
+
+write.csv(investigation_II, "./ice_RNA_II_investigation_summary.csv")
+
+
+
+ice_III_photo_euk <- interactions_III %>%
+  filter(functional.x %in% c("Phototroph","Eukaryvore") & 
+           functional.y %in% c("Phototroph","Eukaryvore") & 
+           functional.x != functional.y) %>%
+  left_join(taxa%>%select(asv_code,subdivision,RNA_dom_size)%>%rename(x=asv_code),by="x") %>%
+  left_join(dom_size_no,by="RNA_dom_size") %>%
+  rows_update(eukaryvore_subdivision , by="subdivision", unmatched="ignore") %>%
+  rename(RNA_dom_size.x=RNA_dom_size, subdivision.x=subdivision, grouping.x=grouping) %>%
+  left_join(taxa%>%select(asv_code,subdivision,RNA_dom_size)%>%rename(y=asv_code),by="y") %>%
+  left_join(dom_size_no,by="RNA_dom_size") %>%
+  rows_update(eukaryvore_subdivision , by="subdivision", unmatched="ignore") %>%
+  rename(RNA_dom_size.y=RNA_dom_size, subdivision.y=subdivision, grouping.y=grouping) %>%
+  select(x,y,pos_neg, functional.x, subdivision.x, species.x, RNA_dom_size.x, grouping.x,
+functional.y, subdivision.y, species.y, RNA_dom_size.y, grouping.y)
+
+write.csv(ice_III_photo_euk, "./ice_RNA_III_investigation.csv")
+
+pos <- ice_III_photo_euk %>% filter(pos_neg=="pos")
+sorted_pairings <- factor(apply(pos[, c("grouping.x", "grouping.y")], 1, function(row) paste(sort(row), collapse = "_")))
+sorted_pairing_pos <- as.data.frame(table(sorted_pairings))
+sorted_pairing_pos$pos_neg <- "pos"
+neg <- ice_III_photo_euk %>% filter(pos_neg=="neg")
+sorted_pairings <- factor(apply(neg[, c("grouping.x", "grouping.y")], 1, function(row) paste(sort(row), collapse = "_")))
+sorted_pairing_neg <- as.data.frame(table(sorted_pairings))
+sorted_pairing_neg$pos_neg <- "neg"
+
+interactions_III_combined <- rbind(sorted_pairing_pos,sorted_pairing_neg) 
+
+interactions_count <-interactions_III_combined %>%
+  group_by(sorted_pairings) %>%
+  summarize(total=sum(Freq))
+
+interactions_III_combined <- interactions_III_combined %>%
+  left_join(interactions_count,by="sorted_pairings") %>%
+  mutate(pos_pct=(Freq/total)*100)
+
+sorted_pairing_levels <- interactions_III_combined %>%
+  filter(pos_neg=="pos") %>%
+  arrange(pos_pct) %>%
+  select(sorted_pairings) 
+
+interactions_ice_III_binned <- interactions_III_combined %>%
+  mutate(pos_bin = cut(pos_pct, breaks=c(0,10,20,30,40,50,60,70,80,90,100), right=FALSE,include.lowest=TRUE)) %>%
+  mutate(pos_bin = sub(",.*","",pos_bin)) 
+
+interactions_ice_III_binned$pos_bin <- str_sub(interactions_ice_III_binned$pos_bin,2)
+
+investigation_III <- interactions_ice_III_binned %>% 
+  filter(pos_neg=="pos") %>%
+  separate(sorted_pairings,into=c("grouping.x", "grouping.y"),sep="_") %>%
+  select(grouping.x, grouping.y, total, pos_bin)
+
+grouping_ASV_diversity <- rbind((ice_III_photo_euk %>% select(x,grouping.x) %>% rename(asv_code=x,grouping=grouping.x)),(ice_III_photo_euk %>% select(y,grouping.y) %>% rename(asv_code=y,grouping=grouping.y))) %>%
+  distinct(asv_code,grouping) %>%
+  group_by(grouping) %>%
+  summarize(asv_diversity=length(asv_code))
+
+investigation_III <- investigation_III %>% 
+  left_join(grouping_ASV_diversity %>% rename(grouping.x=grouping), by="grouping.x") %>%
+  rename(asv_diversity.x=asv_diversity) %>%
+  left_join(grouping_ASV_diversity %>% rename(grouping.y=grouping), by="grouping.y") %>%
+  rename(asv_diversity.y=asv_diversity) %>%
+  mutate_at(vars(total:asv_diversity.y), as.numeric) 
+
+write.csv(investigation_III, "./ice_RNA_III_investigation_summary.csv")
+
+```
+## RNA Network - WATER
+
+### Stage I - water
+
+```{r fig.height=24, fig.width=24}
+ps_water_I <- subset_samples(ps_water_new, bloom_stage=="Stage_I")
+
+asv_norare_water_I <- long_RNA_water %>%
+  filter(bloom_stage=="Stage_I") %>%
+  group_by(asv_code,sample_id) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  group_by(asv_code) %>%
+  count() %>%
+  filter(n>(0.15*length(unique(long_RNA_water_I$sample_id)))) %>%
+  select(-n) %>%
+  left_join(asv_norare_water_I_reads,by="asv_code") %>%
+  filter(n_reads!="NA")
+  
+ps_norare_water_I <- prune_taxa(asv_norare_water_I$asv_code,ps_water_I)
+
+
+#water_I_net<- netConstruct(ps_norare_water_I, 
+#                              measure = "spieceasi",
+#                              normMethod = "clr",
+#                              zeroMethod = "multRepl",
+#                              thresh = 0.3,
+#                              verbose = 3)
+
+#saveRDS(water_I_net,"./GE_IC_functional_figs/RNA_water_I_net.rds")
+water_I_net <- readRDS("./GE_IC_functional_figs/RNA_water_I_net.rds")
+
+#water_I_net_props <- netAnalyze(water_I_net, clustMethod = "cluster_fast_greedy")
+#saveRDS(water_I_net_props,"./GE_IC_functional_figs/RNA_water_I_net_props.rds")
+
+water_I_net_props <- readRDS("./GE_IC_functional_figs/RNA_water_I_net_props.rds")
+
+
+water_I_hubs <- as.data.frame(water_I_net_props$hubs$hubs1) %>% 
+  rename(asv_code="water_I_net_props$hubs$hubs1") %>%
+  left_join(taxa,by="asv_code")
+
+water_I_cluster_asv <- as.data.frame(water_I_net_props$clustering$clust1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(cluster="water_I_net_props$clustering$clust1") %>%
+  left_join(taxa,by="asv_code")
+
+water_I_degree <- as.data.frame(water_I_net_props$centralities$degree1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(degree="water_I_net_props$centralities$degree1")
+
+water_I_between <- as.data.frame(water_I_net_props$centralities$between1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(between="water_I_net_props$centralities$between1")
+
+water_I_close <- as.data.frame(water_I_net_props$centralities$close1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(close="water_I_net_props$centralities$close1")
+
+water_I_eigen <- as.data.frame(water_I_net_props$centralities$eigenv1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(eigen="water_I_net_props$centralities$eigenv1")
+
+water_I_cluster_asv <- water_I_cluster_asv %>%
+  left_join(water_I_degree,by="asv_code") %>%
+  left_join(water_I_between,by="asv_code") %>%
+  left_join(water_I_close,by="asv_code") %>%
+  left_join(water_I_eigen,by="asv_code")%>%
+  left_join(asv_norare_water_I,by="asv_code")
+
+  water_tableI<-water_I_hubs %>%
+  left_join(water_I_cluster_asv%>%select(asv_code,cluster), by="asv_code") %>%
+  select(asv_code,cluster,class,species,functional_trait,specificity) 
+ 
+
+  xtable(water_tableI)
+
+
+plot_I_clusters <- water_I_cluster_asv %>% 
+  group_by(cluster,functional_trait,species) %>%
+  summarize(n_reads=sum(n_reads))
+
+plot_I_clusters$functional_trait<-factor(plot_I_clusters$functional_trait, levels=functionalTraits)
+plot_I_clusters$cluster <- as.character(plot_I_clusters$cluster)
+  
+plot_I_cluster_func <- phyloseq_long_treemap_clusters(plot_I_clusters,cluster,functional_trait,species,"")
+
+```
+
+
+### Stage II - water
+```{r fig.height=24, fig.width=24}
+ps_water_II <- subset_samples(ps_water_new, bloom_stage=="Stage_II")
+
+asv_norare_water_II <- long_RNA_water %>%
+  filter(bloom_stage=="Stage_II") %>%
+  group_by(asv_code,sample_id) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  group_by(asv_code) %>%
+  count() %>%
+  filter(n>(0.15*length(unique(long_RNA_water_II$sample_id)))) %>%
+  select(-n) %>%
+  left_join(asv_norare_water_II_reads,by="asv_code") %>%
+  filter(n_reads!="NA")
+  
+ps_norare_water_II <- prune_taxa(asv_norare_water_II$asv_code,ps_water_II)
+
+
+#water_II_net<- netConstruct(ps_norare_water_II, 
+#                              measure = "spieceasi",
+#                              normMethod = "clr",
+#                              zeroMethod = "multRepl",
+#                              thresh = 0.3,
+#                              verbose = 3)
+
+#saveRDS(water_II_net,"./GE_IC_functional_figs/RNA_water_II_net.rds")
+water_II_net <- readRDS("./GE_IC_functional_figs/RNA_water_II_net.rds")
+
+#water_II_net_props <- netAnalyze(water_II_net, clustMethod = "cluster_fast_greedy")
+#saveRDS(water_II_net_props,"./GE_IC_functional_figs/RNA_water_II_net_props.rds")
+
+water_II_net_props <- readRDS("./GE_IC_functional_figs/RNA_water_II_net_props.rds")
+
+
+water_II_hubs <- as.data.frame(water_II_net_props$hubs$hubs1) %>% 
+  rename(asv_code="water_II_net_props$hubs$hubs1") %>%
+  left_join(taxa,by="asv_code")
+
+water_II_cluster_asv <- as.data.frame(water_II_net_props$clustering$clust1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(cluster="water_II_net_props$clustering$clust1") %>%
+  left_join(taxa,by="asv_code")
+
+water_II_degree <- as.data.frame(water_II_net_props$centralities$degree1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(degree="water_II_net_props$centralities$degree1")
+
+water_II_between <- as.data.frame(water_II_net_props$centralities$between1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(between="water_II_net_props$centralities$between1")
+
+water_II_close <- as.data.frame(water_II_net_props$centralities$close1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(close="water_II_net_props$centralities$close1")
+
+water_II_eigen <- as.data.frame(water_II_net_props$centralities$eigenv1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(eigen="water_II_net_props$centralities$eigenv1")
+
+water_II_cluster_asv <- water_II_cluster_asv %>%
+  left_join(water_II_degree,by="asv_code") %>%
+  left_join(water_II_between,by="asv_code") %>%
+  left_join(water_II_close,by="asv_code") %>%
+  left_join(water_II_eigen,by="asv_code")%>%
+  left_join(asv_norare_water_II,by="asv_code")
+
+  water_tableII<-water_II_hubs %>%
+  left_join(water_II_cluster_asv%>%select(asv_code,cluster), by="asv_code") %>%
+  select(asv_code,cluster,class,species,functional_trait,specificity) 
+ 
+
+  xtable(water_tableII)
+
+
+plot_II_clusters <- water_II_cluster_asv %>% 
+  group_by(cluster,functional_trait,species) %>%
+  summarize(n_reads=sum(n_reads))
+
+plot_II_clusters$functional_trait<-factor(plot_II_clusters$functional_trait, levels=functionalTraits)
+plot_II_clusters$cluster <- as.character(plot_II_clusters$cluster)
+  
+plot_II_cluster_func <- phyloseq_long_treemap_clusters(plot_II_clusters,cluster,functional_trait,species,"")
+
+```
+
+### Stage III - water
+```{r fig.height=24, fig.width=24}
+ps_water_III <- subset_samples(ps_water_new, bloom_stage=="Stage_III")
+
+asv_norare_water_III <- long_RNA_water %>%
+  filter(bloom_stage=="Stage_III") %>%
+  group_by(asv_code,sample_id) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  group_by(asv_code) %>%
+  count() %>%
+  filter(n>(0.15*length(unique(long_RNA_water_III$sample_id)))) %>%
+  select(-n) %>%
+  left_join(asv_norare_water_III_reads,by="asv_code") %>%
+  filter(n_reads!="NA")
+  
+ps_norare_water_III <- prune_taxa(asv_norare_water_III$asv_code,ps_water_III)
+
+
+#water_III_net<- netConstruct(ps_norare_water_III, 
+#                              measure = "spieceasi",
+#                              normMethod = "clr",
+#                              zeroMethod = "multRepl",
+#                              thresh = 0.3,
+#                              verbose = 3)
+
+#saveRDS(water_III_net,"./GE_IC_functional_figs/RNA_water_III_net.rds")
+water_III_net <- readRDS("./GE_IC_functional_figs/RNA_water_III_net.rds")
+
+#water_III_net_props <- netAnalyze(water_III_net, clustMethod = "cluster_fast_greedy")
+#saveRDS(water_III_net_props,"./GE_IC_functional_figs/RNA_water_III_net_props.rds")
+
+water_III_net_props <- readRDS("./GE_IC_functional_figs/RNA_water_III_net_props.rds")
+
+
+water_III_hubs <- as.data.frame(water_III_net_props$hubs$hubs1) %>% 
+  rename(asv_code="water_III_net_props$hubs$hubs1") %>%
+  left_join(taxa,by="asv_code")
+
+water_III_cluster_asv <- as.data.frame(water_III_net_props$clustering$clust1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(cluster="water_III_net_props$clustering$clust1") %>%
+  left_join(taxa,by="asv_code")
+
+water_III_degree <- as.data.frame(water_III_net_props$centralities$degree1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(degree="water_III_net_props$centralities$degree1")
+
+water_III_between <- as.data.frame(water_III_net_props$centralities$between1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(between="water_III_net_props$centralities$between1")
+
+water_III_close <- as.data.frame(water_III_net_props$centralities$close1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(close="water_III_net_props$centralities$close1")
+
+water_III_eigen <- as.data.frame(water_III_net_props$centralities$eigenv1) %>% 
+  rownames_to_column("asv_code") %>%
+  rename(eigen="water_III_net_props$centralities$eigenv1")
+
+water_III_cluster_asv <- water_III_cluster_asv %>%
+  left_join(water_III_degree,by="asv_code") %>%
+  left_join(water_III_between,by="asv_code") %>%
+  left_join(water_III_close,by="asv_code") %>%
+  left_join(water_III_eigen,by="asv_code")%>%
+  left_join(asv_norare_water_III,by="asv_code")
+
+  water_tableIII<-water_III_hubs %>%
+  left_join(water_III_cluster_asv%>%select(asv_code,cluster), by="asv_code") %>%
+  select(asv_code,cluster,class,species,functional_trait,specificity) 
+ 
+
+  xtable(water_tableIII)
+
+
+plot_III_clusters <- water_III_cluster_asv %>% 
+  group_by(cluster,functional_trait,species) %>%
+  summarize(n_reads=sum(n_reads))
+
+plot_III_clusters$functional_trait<-factor(plot_III_clusters$functional_trait, levels=functionalTraits)
+plot_III_clusters$cluster <- as.character(plot_III_clusters$cluster)
+  
+plot_III_cluster_func <- phyloseq_long_treemap_clusters(plot_III_clusters,cluster,functional_trait,species,"")
+
+pdf("./GE_IC_functional_figs/supplementary_RNA_water_clusters.pdf", height=32, width=18) ; plot(plot_I_cluster_func/plot_II_cluster_func/plot_III_cluster_func); dev.off() 
+```
+
+
+
+## analyzing water network data
+
+```{r fig.height=6, fig.width=14}
+water_I_cluster_asv$stage <- "I"
+water_II_cluster_asv$stage <- "II"
+water_III_cluster_asv$stage <- "III"
+
+water_eigen <- rbind(water_I_cluster_asv,water_II_cluster_asv,water_III_cluster_asv)
+
+water_eigen$trophic_mode<-factor(water_eigen$trophic_mode, levels=trophicMode)
+water_eigen$stage<-factor(water_eigen$stage, levels=c("I","II","III"))
+water_eigen$functional_trait<-factor(water_eigen$functional_trait, levels=functionalTraits)
+
+p_water_eigen <- ggplot(water_eigen %>% filter(functional_trait!="Invertebrate_parasite"), aes(x=eigen, y=fct_rev(functional_trait), color=functional_trait)) + 
+  geom_boxplot(width=0.4, outlier.shape=NA) +
+  geom_jitter(width=0.1,alpha=0.5) +
+  theme_bw() +
+  xlab("Eigen centrality") +
+  theme(axis.title.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor=element_blank(),
+        text=element_text(size=16),
+        legend.position="none") +
+   facet_grid(cols = vars(stage)) +
+  scale_color_manual(values=functionalPalette)
+
+p_water_eigen
+
+pdf("./GE_IC_functional_figs/supplementary_RNA_water_eigen.pdf", height=7, width=16) ; plot(p_water_eigen); dev.off() 
+
+```
+
+### Co-occurence and co-exclusion summary in WATER Stage I
+```{r fig.height=12, fig.width=7}
+
+self_interaction <- c("Phototroph-Phototroph",
+                      "Mixotroph-Mixotroph",
+                      "Protist_parasite-Protist_parasite",
+                      "Invertebrate_parasite-Invertebrate_parasite",
+                      "Eukaryvore-Eukaryvore",
+                      "Omnivore-Omnivore",
+                      "Bacterivore-Bacterivore",
+                      "Saprophyte-Saprophyte",
+                      "Other_Dinophyceae-Other_Dinophyceae")
+
+
+interactions_I <- water_I_net$edgelist1 %>%
+  rename(asv_code=v1) %>% 
+  left_join(taxa%>%select(asv_code,functional_trait,species,specificity),by="asv_code") %>%
+  rename(functional.x=functional_trait, x=asv_code, asv_code=v2, species.x=species, specificity.x=specificity) %>%
+  left_join(taxa%>%select(asv_code,functional_trait,species,specificity),by="asv_code") %>%
+  rename(functional.y=functional_trait, y=asv_code, species.y=species, specificity.y=specificity)%>%
+  arrange(desc(asso)) %>%
+  mutate(pos_neg=ifelse(asso>0,"pos","neg"))
+
+water_I_overall <- interactions_I %>%
+  select(x,y,functional.x,functional.y,asso,pos_neg) %>% 
+  left_join(water_I_cluster_asv%>%select(asv_code,cluster)%>%rename(x=asv_code), by="x") %>%
+  left_join(water_I_cluster_asv%>%select(asv_code,cluster)%>%rename(y=asv_code), by="y")
+
+water_I_overall$hub.x <- ifelse(water_I_overall$x %in% water_I_hubs$asv_code, "yes","no")
+water_I_overall$hub.y <- ifelse(water_I_overall$y %in% water_I_hubs$asv_code, "yes","no")
+write.csv(water_I_overall, "./water_RNA_I_overall.csv")
+
+interactions_I_pos <-filter(interactions_I, interactions_I$pos_neg=="pos")
+interactions_I_neg <-filter(interactions_I, interactions_I$pos_neg=="neg")
+
+# Create a combined factor representing the pairs, sorted
+sorted_pairings <- factor(apply(interactions_I_pos[, c("functional.x", "functional.y")], 1, function(row) paste(sort(row), collapse = "-")))
+sorted_pairing_pos <- as.data.frame(table(sorted_pairings))
+sorted_pairing_pos$pos_neg <- "pos"
+
+sorted_pairings <- factor(apply(interactions_I_neg[, c("functional.x", "functional.y")], 1, function(row) paste(sort(row), collapse = "-")))
+sorted_pairing_neg <- as.data.frame(table(sorted_pairings))
+sorted_pairing_neg$pos_neg <- "neg"
+
+interactions_I_combined <- rbind(sorted_pairing_pos,sorted_pairing_neg) 
+
+interactions_count <-interactions_I_combined %>%
+  group_by(sorted_pairings) %>%
+  summarize(total=sum(Freq))
+
+interactions_I_combined <- interactions_I_combined %>%
+  left_join(interactions_count,by="sorted_pairings") %>%
+  mutate(pos_pct=(Freq/total)*100) #%>%
+  #filter(total>=10) 
+
+sorted_pairing_levels <- interactions_I_combined %>%
+  filter(pos_neg=="pos") %>%
+  arrange(pos_pct) %>%
+  select(sorted_pairings) 
+
+interactions_I_combined$sorted_pairings <- factor(interactions_I_combined$sorted_pairings,levels=sorted_pairing_levels$sorted_pairings)
+
+p_interactions_water_I <- ggplot(interactions_I_combined%>%filter(total>=10), aes(x=Freq, y=sorted_pairings, fill=pos_neg)) +
+  geom_bar(position="fill", stat="identity", color="black",size=0.3) + 
+  geom_text(aes(x=Freq, y=sorted_pairings, label=Freq, vjust=0.5),
+                  position=position_fill(vjust=0.5),
+                  size=4, 
+                  show.legend = FALSE, 
+                  family="Helvetica",
+                  color="white") +
+  theme_bw() +
+  theme(text=element_text(size=22),
+        axis.text.x = element_text(angle = 90, hjust=1),
+        axis.title=element_blank(),
+        legend.title=element_blank(),
+        legend.position = "bottom",
+        plot.margin = unit(c(0,0,3,0), "cm"),
+        panel.grid=element_blank(),
+        strip.background=element_blank(),
+        legend.key.size=unit(2,"line")) +
+  scale_fill_manual(values=c("#2f67b1","#bf2c23"),breaks=c("pos","neg"))
+
+interactions_water_I_binned <- interactions_I_combined %>%
+  mutate(pos_bin = cut(pos_pct, breaks=c(0,10,20,30,40,50,60,70,80,90,100), right=FALSE,include.lowest=TRUE)) %>%
+  mutate(self = ifelse(sorted_pairings%in%self_interaction,"Yes","No")) %>%
+  mutate(pos_bin = sub(",.*","",pos_bin)) 
+
+interactions_water_I_binned$pos_bin <- str_sub(interactions_water_I_binned$pos_bin,2)
+
+interactions_water_I_binned_self <- interactions_water_I_binned %>%
+  filter(self=="Yes" & pos_neg=="pos") %>%
+  rename(functional_trait = sorted_pairings) %>% 
+  select(functional_trait,total,pos_bin) %>%
+  mutate(functional_trait = sub("-.*", "", functional_trait))
+
+
+water_I_edges <- interactions_water_I_binned %>% 
+  filter(self=="No" & pos_neg=="pos") %>% 
+  separate(sorted_pairings,into=c("functional.x", "functional.y"),sep="-") %>%
+  select(functional.x, functional.y, total, pos_bin)
+
+interaction_count <- vector()
+for (i in 1:length(functionalTraits)){
+  count <- water_I_edges %>% 
+    filter(functional.x == functionalTraits[i] | functional.y == functionalTraits[i])
+  count <- sum(count$total)
+  interaction_count[i] <- count
+}
+
+
+circle_position <- data.frame("circle_position"=c(1:9),
+                              "functional_trait" = functionalTraits,
+                              "interaction_count" = interaction_count)
+
+water_I_nodes <- long_RNA_water_I %>%
+  group_by(functional_trait) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  left_join(interactions_water_I_binned_self, by="functional_trait") %>%
+  left_join(circle_position, by="functional_trait") %>%
+  rename(self=total,self_posbin=pos_bin)
+
+
+water_I_network <- water_I_edges %>%
+  left_join(water_I_nodes%>%rename(functional.x=functional_trait), by="functional.x") %>%
+  rename(self.x=self,self_posbin.x=self_posbin, n_reads.x=n_reads,circle_position.x=circle_position) %>%
+  left_join(water_I_nodes%>%rename(functional.y=functional_trait), by="functional.y") %>%
+  rename(self.y=self,self_posbin.y=self_posbin, n_reads.y=n_reads, circle_position.y=circle_position) 
+  
+water_I_network[is.na(water_I_network)] <- 0
+
+water_I_network <- water_I_network %>% 
+  mutate_at(c("pos_bin","self_posbin.x","self_posbin.y"), as.numeric) %>%
+  mutate(n_reads.x=round(n_reads.x*(88/31)), n_reads.y=round(n_reads.y*(88/31)))
+#to make all network node sizes are normalised
+
+write.csv(water_I_network, "./water_RNA_I_network.csv")
+
+```
+
+### Co-occurence and co-exclusion summary in WATER Stage II
+```{r}
+interactions_II <- water_II_net$edgelist1 %>%
+  rename(asv_code=v1) %>% 
+  left_join(taxa%>%select(asv_code,functional_trait,species,specificity),by="asv_code") %>%
+  rename(functional.x=functional_trait, x=asv_code, asv_code=v2, species.x=species, specificity.x=specificity) %>%
+  left_join(taxa%>%select(asv_code,functional_trait,species,specificity),by="asv_code") %>%
+  rename(functional.y=functional_trait, y=asv_code, species.y=species, specificity.y=specificity)%>%
+  arrange(desc(asso)) %>%
+  mutate(pos_neg=ifelse(asso>0,"pos","neg"))
+
+water_II_overall <- interactions_II %>%
+  select(x,y,functional.x,functional.y,asso,pos_neg) %>% 
+  left_join(water_II_cluster_asv%>%select(asv_code,cluster)%>%rename(x=asv_code), by="x") %>%
+  left_join(water_II_cluster_asv%>%select(asv_code,cluster)%>%rename(y=asv_code), by="y")
+
+water_II_overall$hub.x <- ifelse(water_II_overall$x %in% water_II_hubs$asv_code, "yes","no")
+water_II_overall$hub.y <- ifelse(water_II_overall$y %in% water_II_hubs$asv_code, "yes","no")
+write.csv(water_II_overall, "./water_RNA_II_overall.csv")
+
+interactions_II_pos <-filter(interactions_II, interactions_II$pos_neg=="pos")
+interactions_II_neg <-filter(interactions_II, interactions_II$pos_neg=="neg")
+
+# Create a combined factor representing the pairs, sorted
+sorted_pairings <- factor(apply(interactions_II_pos[, c("functional.x", "functional.y")], 1, function(row) paste(sort(row), collapse = "-")))
+sorted_pairing_pos <- as.data.frame(table(sorted_pairings))
+sorted_pairing_pos$pos_neg <- "pos"
+
+sorted_pairings <- factor(apply(interactions_II_neg[, c("functional.x", "functional.y")], 1, function(row) paste(sort(row), collapse = "-")))
+sorted_pairing_neg <- as.data.frame(table(sorted_pairings))
+sorted_pairing_neg$pos_neg <- "neg"
+
+interactions_II_combined <- rbind(sorted_pairing_pos,sorted_pairing_neg) 
+
+interactions_count <-interactions_II_combined %>%
+  group_by(sorted_pairings) %>%
+  summarize(total=sum(Freq))
+
+interactions_II_combined <- interactions_II_combined %>%
+  left_join(interactions_count,by="sorted_pairings") %>%
+  mutate(pos_pct=(Freq/total)*100) #%>%
+  #filter(total>=10) 
+
+sorted_pairing_levels <- interactions_II_combined %>%
+  filter(pos_neg=="pos") %>%
+  arrange(pos_pct) %>%
+  select(sorted_pairings) 
+
+interactions_II_combined$sorted_pairings <- factor(interactions_II_combined$sorted_pairings,levels=sorted_pairing_levels$sorted_pairings)
+
+p_interactions_water_II <- ggplot(interactions_II_combined%>%filter(total>=10), aes(x=Freq, y=sorted_pairings, fill=pos_neg)) +
+  geom_bar(position="fill", stat="identity", color="black",size=0.3) + 
+  geom_text(aes(x=Freq, y=sorted_pairings, label=Freq, vjust=0.5),
+                  position=position_fill(vjust=0.5),
+                  size=4, 
+                  show.legend = FALSE, 
+                  family="Helvetica",
+                  color="white") +
+  theme_bw() +
+  theme(text=element_text(size=22),
+        axis.text.x = element_text(angle = 90, hjust=1),
+        axis.title=element_blank(),
+        legend.title=element_blank(),
+        legend.position = "bottom",
+        plot.margin = unit(c(0,0,3,0), "cm"),
+        panel.grid=element_blank(),
+        strip.background=element_blank(),
+        legend.key.size=unit(2,"line")) +
+  scale_fill_manual(values=c("#2f67b1","#bf2c23"),breaks=c("pos","neg"))
+
+interactions_water_II_binned <- interactions_II_combined %>%
+  mutate(pos_bin = cut(pos_pct, breaks=c(0,10,20,30,40,50,60,70,80,90,100), right=FALSE,include.lowest=TRUE)) %>%
+  mutate(self = ifelse(sorted_pairings%in%self_interaction,"Yes","No")) %>%
+  mutate(pos_bin = sub(",.*","",pos_bin)) 
+
+interactions_water_II_binned$pos_bin <- str_sub(interactions_water_II_binned$pos_bin,2)
+
+interactions_water_II_binned_self <- interactions_water_II_binned %>%
+  filter(self=="Yes" & pos_neg=="pos") %>%
+  rename(functional_trait = sorted_pairings) %>% 
+  select(functional_trait,total,pos_bin) %>%
+  mutate(functional_trait = sub("-.*", "", functional_trait))
+
+
+water_II_edges <- interactions_water_II_binned %>% 
+  filter(self=="No" & pos_neg=="pos") %>% 
+  separate(sorted_pairings,into=c("functional.x", "functional.y"),sep="-") %>%
+  select(functional.x, functional.y, total, pos_bin)
+
+interaction_count <- vector()
+for (i in 1:length(functionalTraits)){
+  count <- water_II_edges %>% 
+    filter(functional.x == functionalTraits[i] | functional.y == functionalTraits[i])
+  count <- sum(count$total)
+  interaction_count[i] <- count
+}
+
+
+circle_position <- data.frame("circle_position"=c(1:9),
+                              "functional_trait" = functionalTraits,
+                              "interaction_count" = interaction_count)
+
+water_II_nodes <- long_RNA_water_II %>%
+  group_by(functional_trait) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  left_join(interactions_water_II_binned_self, by="functional_trait") %>%
+  left_join(circle_position, by="functional_trait") %>%
+  rename(self=total,self_posbin=pos_bin)
+
+
+water_II_network <- water_II_edges %>%
+  left_join(water_II_nodes%>%rename(functional.x=functional_trait), by="functional.x") %>%
+  rename(self.x=self,self_posbin.x=self_posbin, n_reads.x=n_reads,circle_position.x=circle_position) %>%
+  left_join(water_II_nodes%>%rename(functional.y=functional_trait), by="functional.y") %>%
+  rename(self.y=self,self_posbin.y=self_posbin, n_reads.y=n_reads, circle_position.y=circle_position) 
+  
+water_II_network[is.na(water_II_network)] <- 0
+
+water_II_network <- water_II_network %>% 
+  mutate_at(c("pos_bin","self_posbin.x","self_posbin.y"), as.numeric) %>%
+  mutate(n_reads.x=round(n_reads.x*(88/19)), n_reads.y=round(n_reads.y*(88/19)))
+#to make all network node sizes are normalised
+
+write.csv(water_II_network, "./water_RNA_II_network.csv")
+```
+
+### Co-occurence and co-exclusion summary in WATER Stage III
+```{r}
+interactions_III <- water_III_net$edgelist1 %>%
+  rename(asv_code=v1) %>% 
+  left_join(taxa%>%select(asv_code,functional_trait,species,specificity),by="asv_code") %>%
+  rename(functional.x=functional_trait, x=asv_code, asv_code=v2, species.x=species, specificity.x=specificity) %>%
+  left_join(taxa%>%select(asv_code,functional_trait,species,specificity),by="asv_code") %>%
+  rename(functional.y=functional_trait, y=asv_code, species.y=species, specificity.y=specificity)%>%
+  arrange(desc(asso)) %>%
+  mutate(pos_neg=ifelse(asso>0,"pos","neg"))
+
+water_III_overall <- interactions_III %>%
+  select(x,y,functional.x,functional.y,asso,pos_neg) %>% 
+  left_join(water_III_cluster_asv%>%select(asv_code,cluster)%>%rename(x=asv_code), by="x") %>%
+  left_join(water_III_cluster_asv%>%select(asv_code,cluster)%>%rename(y=asv_code), by="y")
+
+water_III_overall$hub.x <- ifelse(water_III_overall$x %in% water_III_hubs$asv_code, "yes","no")
+water_III_overall$hub.y <- ifelse(water_III_overall$y %in% water_III_hubs$asv_code, "yes","no")
+write.csv(water_III_overall, "./water_RNA_III_overall.csv")
+
+interactions_III_pos <-filter(interactions_III, interactions_III$pos_neg=="pos")
+interactions_III_neg <-filter(interactions_III, interactions_III$pos_neg=="neg")
+
+# Create a combined factor representing the pairs, sorted
+sorted_pairings <- factor(apply(interactions_III_pos[, c("functional.x", "functional.y")], 1, function(row) paste(sort(row), collapse = "-")))
+sorted_pairing_pos <- as.data.frame(table(sorted_pairings))
+sorted_pairing_pos$pos_neg <- "pos"
+
+sorted_pairings <- factor(apply(interactions_III_neg[, c("functional.x", "functional.y")], 1, function(row) paste(sort(row), collapse = "-")))
+sorted_pairing_neg <- as.data.frame(table(sorted_pairings))
+sorted_pairing_neg$pos_neg <- "neg"
+
+interactions_III_combined <- rbind(sorted_pairing_pos,sorted_pairing_neg) 
+
+interactions_count <-interactions_III_combined %>%
+  group_by(sorted_pairings) %>%
+  summarize(total=sum(Freq))
+
+interactions_III_combined <- interactions_III_combined %>%
+  left_join(interactions_count,by="sorted_pairings") %>%
+  mutate(pos_pct=(Freq/total)*100) #%>%
+  #filter(total>=10) 
+
+sorted_pairing_levels <- interactions_III_combined %>%
+  filter(pos_neg=="pos") %>%
+  arrange(pos_pct) %>%
+  select(sorted_pairings) 
+
+interactions_III_combined$sorted_pairings <- factor(interactions_III_combined$sorted_pairings,levels=sorted_pairing_levels$sorted_pairings)
+
+p_interactions_water_III <- ggplot(interactions_III_combined%>%filter(total>=10), aes(x=Freq, y=sorted_pairings, fill=pos_neg)) +
+  geom_bar(position="fill", stat="identity", color="black",size=0.3) + 
+  geom_text(aes(x=Freq, y=sorted_pairings, label=Freq, vjust=0.5),
+                  position=position_fill(vjust=0.5),
+                  size=4, 
+                  show.legend = FALSE, 
+                  family="Helvetica",
+                  color="white") +
+  theme_bw() +
+  theme(text=element_text(size=22),
+        axis.text.x = element_text(angle = 90, hjust=1),
+        axis.title=element_blank(),
+        legend.title=element_blank(),
+        legend.position = "bottom",
+        plot.margin = unit(c(0,0,3,0), "cm"),
+        panel.grid=element_blank(),
+        strip.background=element_blank(),
+        legend.key.size=unit(2,"line")) +
+  scale_fill_manual(values=c("#2f67b1","#bf2c23"),breaks=c("pos","neg"))
+
+interactions_water_III_binned <- interactions_III_combined %>%
+  mutate(pos_bin = cut(pos_pct, breaks=c(0,10,20,30,40,50,60,70,80,90,100), right=FALSE,include.lowest=TRUE)) %>%
+  mutate(self = ifelse(sorted_pairings%in%self_interaction,"Yes","No")) %>%
+  mutate(pos_bin = sub(",.*","",pos_bin)) 
+
+interactions_water_III_binned$pos_bin <- str_sub(interactions_water_III_binned$pos_bin,2)
+
+interactions_water_III_binned_self <- interactions_water_III_binned %>%
+  filter(self=="Yes" & pos_neg=="pos") %>%
+  rename(functional_trait = sorted_pairings) %>% 
+  select(functional_trait,total,pos_bin) %>%
+  mutate(functional_trait = sub("-.*", "", functional_trait))
+
+
+water_III_edges <- interactions_water_III_binned %>% 
+  filter(self=="No" & pos_neg=="pos") %>% 
+  separate(sorted_pairings,into=c("functional.x", "functional.y"),sep="-") %>%
+  select(functional.x, functional.y, total, pos_bin)
+
+interaction_count <- vector()
+for (i in 1:length(functionalTraits)){
+  count <- water_III_edges %>% 
+    filter(functional.x == functionalTraits[i] | functional.y == functionalTraits[i])
+  count <- sum(count$total)
+  interaction_count[i] <- count
+}
+
+
+circle_position <- data.frame("circle_position"=c(1:9),
+                              "functional_trait" = functionalTraits,
+                              "interaction_count" = interaction_count)
+
+water_III_nodes <- long_RNA_water_III %>%
+  group_by(functional_trait) %>%
+  summarize(n_reads=sum(n_reads)) %>%
+  add_row(functional_trait="Invertebrate_parasite",n_reads=1) %>% #artificially add a Invertebrate_parasite node
+  left_join(interactions_water_III_binned_self, by="functional_trait") %>%
+  left_join(circle_position, by="functional_trait") %>%
+  rename(self=total,self_posbin=pos_bin)
+
+
+water_III_network <- water_III_edges %>%
+  left_join(water_III_nodes%>%rename(functional.x=functional_trait), by="functional.x") %>%
+  rename(self.x=self,self_posbin.x=self_posbin, n_reads.x=n_reads,circle_position.x=circle_position) %>%
+  left_join(water_III_nodes%>%rename(functional.y=functional_trait), by="functional.y") %>%
+  rename(self.y=self,self_posbin.y=self_posbin, n_reads.y=n_reads, circle_position.y=circle_position) 
+
+artificial_row <- c("Mixotroph","Protist_parasite",0,0,87908,15,90,2,91,1,0,0,3,1)
+
+water_III_network[is.na(water_III_network)] <- 0
+
+water_III_network <- water_III_network %>% 
+  rbind(artificial_row) %>%
+  mutate_at(vars(total:interaction_count.y), as.numeric) %>%
+  mutate(n_reads.x=round(n_reads.x*(88/38)), n_reads.y=round(n_reads.y*(88/38)))
+#to make all network node sizes are normalised
+
+write.csv(water_III_network, "./water_RNA_III_network.csv")
+
+pdf("./GE_IC_functional_figs/supplementary_RNA_posneg.pdf", height=36, width=30); plot((p_interactions_ice_I + p_interactions_ice_II + p_interactions_ice_III) / (p_interactions_water_I + p_interactions_water_II + p_interactions_water_III)); dev.off() 
+
+```
+### RNA - water Interactions between Phototrophs and Eukaryvore
+```{r fig.height=10, fig.width=16}
+dom_size_no <- data.frame("RNA_dom_size"=c("pico","nano","micro"),
+                           "grouping"=c("pico-photo","nano-photo","micro-photo"))
+eukaryvore_subdivision <- unique(taxa %>% filter(functional_trait=="Eukaryvore") %>% select(subdivision))
+
+eukaryvore_subdivision <- data.frame(eukaryvore_subdivision,
+                               "grouping"=eukaryvore_subdivision$subdivision)
+
+
+water_I_photo_euk <- interactions_I %>%
+  filter(functional.x %in% c("Phototroph","Eukaryvore") & 
+           functional.y %in% c("Phototroph","Eukaryvore") & 
+           functional.x != functional.y) %>%
+  left_join(taxa%>%select(asv_code,subdivision,RNA_dom_size)%>%rename(x=asv_code),by="x") %>%
+  left_join(dom_size_no,by="RNA_dom_size") %>%
+  rows_update(eukaryvore_subdivision , by="subdivision", unmatched="ignore") %>%
+  rename(RNA_dom_size.x=RNA_dom_size, subdivision.x=subdivision, grouping.x=grouping) %>%
+  left_join(taxa%>%select(asv_code,subdivision,RNA_dom_size)%>%rename(y=asv_code),by="y") %>%
+  left_join(dom_size_no,by="RNA_dom_size") %>%
+  rows_update(eukaryvore_subdivision , by="subdivision", unmatched="ignore") %>%
+  rename(RNA_dom_size.y=RNA_dom_size, subdivision.y=subdivision, grouping.y=grouping) %>%
+  select(x,y,pos_neg, functional.x, subdivision.x, species.x, RNA_dom_size.x, grouping.x,
+functional.y, subdivision.y, species.y, RNA_dom_size.y, grouping.y)
+
+write.csv(water_I_photo_euk, "./water_RNA_I_investigation.csv")
+
+pos <- water_I_photo_euk %>% filter(pos_neg=="pos")
+sorted_pairings <- factor(apply(pos[, c("grouping.x", "grouping.y")], 1, function(row) paste(sort(row), collapse = "_")))
+sorted_pairing_pos <- as.data.frame(table(sorted_pairings))
+sorted_pairing_pos$pos_neg <- "pos"
+neg <- water_I_photo_euk %>% filter(pos_neg=="neg")
+sorted_pairings <- factor(apply(neg[, c("grouping.x", "grouping.y")], 1, function(row) paste(sort(row), collapse = "_")))
+sorted_pairing_neg <- as.data.frame(table(sorted_pairings))
+sorted_pairing_neg$pos_neg <- "neg"
+
+interactions_I_combined <- rbind(sorted_pairing_pos,sorted_pairing_neg) 
+
+interactions_count <-interactions_I_combined %>%
+  group_by(sorted_pairings) %>%
+  summarize(total=sum(Freq))
+
+interactions_I_combined <- interactions_I_combined %>%
+  left_join(interactions_count,by="sorted_pairings") %>%
+  mutate(pos_pct=(Freq/total)*100)
+
+sorted_pairing_levels <- interactions_I_combined %>%
+  filter(pos_neg=="pos") %>%
+  arrange(pos_pct) %>%
+  select(sorted_pairings) 
+
+interactions_water_I_binned <- interactions_I_combined %>%
+  mutate(pos_bin = cut(pos_pct, breaks=c(0,10,20,30,40,50,60,70,80,90,100), right=FALSE,include.lowest=TRUE)) %>%
+  mutate(pos_bin = sub(",.*","",pos_bin)) 
+
+interactions_water_I_binned$pos_bin <- str_sub(interactions_water_I_binned$pos_bin,2)
+
+investigation_I <- interactions_water_I_binned %>% 
+  filter(pos_neg=="pos") %>%
+  separate(sorted_pairings,into=c("grouping.x", "grouping.y"),sep="_") %>%
+  select(grouping.x, grouping.y, total, pos_bin)
+
+grouping_ASV_diversity <- rbind((water_I_photo_euk %>% select(x,grouping.x) %>% rename(asv_code=x,grouping=grouping.x)),(water_I_photo_euk %>% select(y,grouping.y) %>% rename(asv_code=y,grouping=grouping.y))) %>%
+  distinct(asv_code,grouping) %>%
+  group_by(grouping) %>%
+  summarize(asv_diversity=length(asv_code))
+
+investigation_I <- investigation_I %>% 
+  left_join(grouping_ASV_diversity %>% rename(grouping.x=grouping), by="grouping.x") %>%
+  rename(asv_diversity.x=asv_diversity) %>%
+  left_join(grouping_ASV_diversity %>% rename(grouping.y=grouping), by="grouping.y") %>%
+  rename(asv_diversity.y=asv_diversity) %>%
+  mutate_at(vars(total:asv_diversity.y), as.numeric) 
+
+write.csv(investigation_I, "./water_RNA_I_investigation_summary.csv")
+
+
+
+water_II_photo_euk <- interactions_II %>%
+  filter(functional.x %in% c("Phototroph","Eukaryvore") & 
+           functional.y %in% c("Phototroph","Eukaryvore") & 
+           functional.x != functional.y) %>%
+  left_join(taxa%>%select(asv_code,subdivision,RNA_dom_size)%>%rename(x=asv_code),by="x") %>%
+  left_join(dom_size_no,by="RNA_dom_size") %>%
+  rows_update(eukaryvore_subdivision , by="subdivision", unmatched="ignore") %>%
+  rename(RNA_dom_size.x=RNA_dom_size, subdivision.x=subdivision, grouping.x=grouping) %>%
+  left_join(taxa%>%select(asv_code,subdivision,RNA_dom_size)%>%rename(y=asv_code),by="y") %>%
+  left_join(dom_size_no,by="RNA_dom_size") %>%
+  rows_update(eukaryvore_subdivision , by="subdivision", unmatched="ignore") %>%
+  rename(RNA_dom_size.y=RNA_dom_size, subdivision.y=subdivision, grouping.y=grouping) %>%
+  select(x,y,pos_neg, functional.x, subdivision.x, species.x, RNA_dom_size.x, grouping.x,
+functional.y, subdivision.y, species.y, RNA_dom_size.y, grouping.y)
+
+write.csv(water_II_photo_euk, "./water_RNA_II_investigation.csv")
+
+pos <- water_II_photo_euk %>% filter(pos_neg=="pos")
+sorted_pairings <- factor(apply(pos[, c("grouping.x", "grouping.y")], 1, function(row) paste(sort(row), collapse = "_")))
+sorted_pairing_pos <- as.data.frame(table(sorted_pairings))
+sorted_pairing_pos$pos_neg <- "pos"
+neg <- water_II_photo_euk %>% filter(pos_neg=="neg")
+sorted_pairings <- factor(apply(neg[, c("grouping.x", "grouping.y")], 1, function(row) paste(sort(row), collapse = "_")))
+sorted_pairing_neg <- as.data.frame(table(sorted_pairings))
+sorted_pairing_neg$pos_neg <- "neg"
+
+interactions_II_combined <- rbind(sorted_pairing_pos,sorted_pairing_neg) 
+
+interactions_count <-interactions_II_combined %>%
+  group_by(sorted_pairings) %>%
+  summarize(total=sum(Freq))
+
+interactions_II_combined <- interactions_II_combined %>%
+  left_join(interactions_count,by="sorted_pairings") %>%
+  mutate(pos_pct=(Freq/total)*100)
+
+sorted_pairing_levels <- interactions_II_combined %>%
+  filter(pos_neg=="pos") %>%
+  arrange(pos_pct) %>%
+  select(sorted_pairings) 
+
+interactions_water_II_binned <- interactions_II_combined %>%
+  mutate(pos_bin = cut(pos_pct, breaks=c(0,10,20,30,40,50,60,70,80,90,100), right=FALSE,include.lowest=TRUE)) %>%
+  mutate(pos_bin = sub(",.*","",pos_bin)) 
+
+interactions_water_II_binned$pos_bin <- str_sub(interactions_water_II_binned$pos_bin,2)
+
+investigation_II <- interactions_water_II_binned %>% 
+  filter(pos_neg=="pos") %>%
+  separate(sorted_pairings,into=c("grouping.x", "grouping.y"),sep="_") %>%
+  select(grouping.x, grouping.y, total, pos_bin)
+
+grouping_ASV_diversity <- rbind((water_II_photo_euk %>% select(x,grouping.x) %>% rename(asv_code=x,grouping=grouping.x)),(water_II_photo_euk %>% select(y,grouping.y) %>% rename(asv_code=y,grouping=grouping.y))) %>%
+  distinct(asv_code,grouping) %>%
+  group_by(grouping) %>%
+  summarize(asv_diversity=length(asv_code))
+
+investigation_II <- investigation_II %>% 
+  left_join(grouping_ASV_diversity %>% rename(grouping.x=grouping), by="grouping.x") %>%
+  rename(asv_diversity.x=asv_diversity) %>%
+  left_join(grouping_ASV_diversity %>% rename(grouping.y=grouping), by="grouping.y") %>%
+  rename(asv_diversity.y=asv_diversity) %>%
+  mutate_at(vars(total:asv_diversity.y), as.numeric) 
+
+write.csv(investigation_II, "./water_RNA_II_investigation_summary.csv")
+
+
+
+water_III_photo_euk <- interactions_III %>%
+  filter(functional.x %in% c("Phototroph","Eukaryvore") & 
+           functional.y %in% c("Phototroph","Eukaryvore") & 
+           functional.x != functional.y) %>%
+  left_join(taxa%>%select(asv_code,subdivision,RNA_dom_size)%>%rename(x=asv_code),by="x") %>%
+  left_join(dom_size_no,by="RNA_dom_size") %>%
+  rows_update(eukaryvore_subdivision , by="subdivision", unmatched="ignore") %>%
+  rename(RNA_dom_size.x=RNA_dom_size, subdivision.x=subdivision, grouping.x=grouping) %>%
+  left_join(taxa%>%select(asv_code,subdivision,RNA_dom_size)%>%rename(y=asv_code),by="y") %>%
+  left_join(dom_size_no,by="RNA_dom_size") %>%
+  rows_update(eukaryvore_subdivision , by="subdivision", unmatched="ignore") %>%
+  rename(RNA_dom_size.y=RNA_dom_size, subdivision.y=subdivision, grouping.y=grouping) %>%
+  select(x,y,pos_neg, functional.x, subdivision.x, species.x, RNA_dom_size.x, grouping.x,
+functional.y, subdivision.y, species.y, RNA_dom_size.y, grouping.y)
+
+write.csv(water_III_photo_euk, "./water_RNA_III_investigation.csv")
+
+pos <- water_III_photo_euk %>% filter(pos_neg=="pos")
+sorted_pairings <- factor(apply(pos[, c("grouping.x", "grouping.y")], 1, function(row) paste(sort(row), collapse = "_")))
+sorted_pairing_pos <- as.data.frame(table(sorted_pairings))
+sorted_pairing_pos$pos_neg <- "pos"
+neg <- water_III_photo_euk %>% filter(pos_neg=="neg")
+sorted_pairings <- factor(apply(neg[, c("grouping.x", "grouping.y")], 1, function(row) paste(sort(row), collapse = "_")))
+sorted_pairing_neg <- as.data.frame(table(sorted_pairings))
+sorted_pairing_neg$pos_neg <- "neg"
+
+interactions_III_combined <- rbind(sorted_pairing_pos,sorted_pairing_neg) 
+
+interactions_count <-interactions_III_combined %>%
+  group_by(sorted_pairings) %>%
+  summarize(total=sum(Freq))
+
+interactions_III_combined <- interactions_III_combined %>%
+  left_join(interactions_count,by="sorted_pairings") %>%
+  mutate(pos_pct=(Freq/total)*100)
+
+sorted_pairing_levels <- interactions_III_combined %>%
+  filter(pos_neg=="pos") %>%
+  arrange(pos_pct) %>%
+  select(sorted_pairings) 
+
+interactions_water_III_binned <- interactions_III_combined %>%
+  mutate(pos_bin = cut(pos_pct, breaks=c(0,10,20,30,40,50,60,70,80,90,100), right=FALSE,include.lowest=TRUE)) %>%
+  mutate(pos_bin = sub(",.*","",pos_bin)) 
+
+interactions_water_III_binned$pos_bin <- str_sub(interactions_water_III_binned$pos_bin,2)
+
+investigation_III <- interactions_water_III_binned %>% 
+  filter(pos_neg=="pos") %>%
+  separate(sorted_pairings,into=c("grouping.x", "grouping.y"),sep="_") %>%
+  select(grouping.x, grouping.y, total, pos_bin)
+
+grouping_ASV_diversity <- rbind((water_III_photo_euk %>% select(x,grouping.x) %>% rename(asv_code=x,grouping=grouping.x)),(water_III_photo_euk %>% select(y,grouping.y) %>% rename(asv_code=y,grouping=grouping.y))) %>%
+  distinct(asv_code,grouping) %>%
+  group_by(grouping) %>%
+  summarize(asv_diversity=length(asv_code))
+
+investigation_III <- investigation_III %>% 
+  left_join(grouping_ASV_diversity %>% rename(grouping.x=grouping), by="grouping.x") %>%
+  rename(asv_diversity.x=asv_diversity) %>%
+  left_join(grouping_ASV_diversity %>% rename(grouping.y=grouping), by="grouping.y") %>%
+  rename(asv_diversity.y=asv_diversity) %>%
+  mutate_at(vars(total:asv_diversity.y), as.numeric) 
+
+write.csv(investigation_III, "./water_RNA_III_investigation_summary.csv")
+
+```
+
+# All network properties
+```{r}
+Network <- c("Ice Stage I", "Ice Stage II", "Ice Stage III", "Water Stage I", "Water Stage II", "Water Stage III")
+
+Cluster_coefficient <- c(ice_I_net_props$globalProps$clustCoef1,
+                         ice_II_net_props$globalProps$clustCoef1,
+                         ice_III_net_props$globalProps$clustCoef1,
+                         water_I_net_props$globalProps$clustCoef1,
+                         water_II_net_props$globalProps$clustCoef1,
+                         water_III_net_props$globalProps$clustCoef1)
+
+No_of_clusters <- c(max(ice_I_net_props$clustering$clust1),
+                         max(ice_II_net_props$clustering$clust1),
+                         max(ice_III_net_props$clustering$clust1),
+                         max(water_I_net_props$clustering$clust1),
+                         max(water_II_net_props$clustering$clust1),
+                         max(water_III_net_props$clustering$clust1))
+
+Modularity <- c(ice_I_net_props$globalProps$modularity1,
+                         ice_II_net_props$globalProps$modularity1,
+                         ice_III_net_props$globalProps$modularity1,
+                         water_I_net_props$globalProps$modularity1,
+                         water_II_net_props$globalProps$modularity1,
+                         water_III_net_props$globalProps$modularity1)
+
+No_of_nodes <- c(nrow(ice_I_cluster_asv),
+                 nrow(ice_II_cluster_asv),
+                 nrow(ice_III_cluster_asv),
+                 nrow(water_I_cluster_asv),
+                 nrow(water_II_cluster_asv),
+                 nrow(water_III_cluster_asv))
+
+No_of_edges <- c(nrow(ice_I_net$edgelist1),
+                 nrow(ice_II_net$edgelist1),
+                 nrow(ice_III_net$edgelist1),
+                 nrow(water_I_net$edgelist1),
+                 nrow(water_II_net$edgelist1),
+                 nrow(water_III_net$edgelist1))
+
+network_properties <- data.frame(Network, Cluster_coefficient, No_of_clusters, Modularity, No_of_nodes, No_of_edges)
+
+ xtable(network_properties)
+```
+
+
+# DNA cross substrate migration
+```{r}
+df <- long_DNA %>% 
+  filter(asv_code %in% asv_norare_water_I$asv_code | asv_code %in% asv_norare_water_II$asv_code | asv_code %in% asv_norare_water_III$asv_code | asv_code %in% asv_norare_ice_I$asv_code | asv_code %in% asv_norare_ice_II$asv_code | asv_code %in% asv_norare_ice_III$asv_code) %>%
+  group_by(date,substrate,depth_level,fraction_name,specificity) %>%
+  summarize(n_reads=sum(n_reads))
+
+df$specificity <- factor(df$specificity,levels=specificityList)
+  
+p_seeding <- ggplot(df, aes(x=date, y=n_reads, fill=specificity)) + 
+  geom_bar(position="fill", stat="identity", color="black",size=0.3) + 
+  theme_bw() +
+  theme(text=element_text(size=12),
+        axis.text.x = element_text(angle = 90),
+        axis.title.x=element_blank(),
+        panel.spacing.x=unit(2, "lines"),
+        panel.spacing.y=unit(1, "lines"), 
+        plot.margin = unit(c(0,0,3,0), "cm"),
+        panel.grid=element_blank(),
+        strip.background=element_blank(),
+        legend.position="bottom",
+        legend.key.size=unit(2,"line")) +
+  ylab("Proportion of DNA reads") +
+  facet_grid(rows=vars(depth_level)) +
+ scale_y_continuous(labels=scales::percent, breaks = seq(0,1, by=0.5)) +
+  scale_fill_manual(values=specificityPalette,breaks=specificityList)
+p_seeding 
+
+pdf("./GE_IC_functional_figs/main_DNA_seeding.pdf", height=11, width=5); plot(p_seeding); dev.off() 
+
+
+#What is from the ice and appearing in water 
+seeding_II <- long_DNA_water %>%
+  filter(specificity=="ice", bloom_stage=="Stage_II")
+
+p_seeding_II <- phyloseq_long_treemap_functionaltrait(seeding_II,functional_trait,species,"")
+
+seeding_II_asvs <- as.data.frame(unique(seeding_II$asv_code)) %>%
+  rename(asv_code="unique(seeding_II$asv_code)")
+seeding_II_asvs$specificity <- "ice"
+
+seeding_II <- water_II_hubs %>%
+  left_join(seeding_II_asvs, by="asv_code")
+
+#What is from the water and appearing in ice
+seeding_III <- long_DNA_ice %>%
+  filter(specificity=="water", bloom_stage=="Stage_III")
+
+p_seeding_III <- phyloseq_long_treemap_functionaltrait(seeding_III,functional_trait,species,"")
+
+seeding_III_asvs <- as.data.frame(unique(seeding_III$asv_code)) %>%
+  rename(asv_code="unique(seeding_III$asv_code)")
+seeding_III_asvs$specificity <- "water"
+
+seeding_III <- ice_III_hubs %>%
+  left_join(seeding_III_asvs, by="asv_code")
+
+pdf("./GE_IC_functional_figs/main_DNA_tree_seeding.pdf", height=20, width=10); plot(p_seeding_II/p_seeding_III); dev.off() 
+
+```
+
+
+
+
+
